@@ -268,27 +268,31 @@ class VCFParser:
             "high_confidence_rate": metrics["high_confidence_variants"] / total if total > 0 else 0,
         }
         
-        # Quality score statistics
-        if metrics["qual_scores"]:
+        # Quality score statistics.
+        # Coerce to plain Python floats first: values may be numpy scalars
+        # (from cyvcf2) which statistics.mean/median cannot handle.
+        qual_scores = [float(x) for x in metrics["qual_scores"] if x is not None]
+        if qual_scores:
             summary["qual_stats"] = {
-                "mean": statistics.mean(metrics["qual_scores"]),
-                "median": statistics.median(metrics["qual_scores"]),
-                "min": min(metrics["qual_scores"]),
-                "max": max(metrics["qual_scores"])
+                "mean": statistics.mean(qual_scores),
+                "median": statistics.median(qual_scores),
+                "min": min(qual_scores),
+                "max": max(qual_scores)
             }
-            
+
         # Depth statistics
-        if metrics.get("depth_values"):
+        depth_values = [float(x) for x in metrics.get("depth_values", []) if x is not None]
+        if depth_values:
             summary["depth_stats"] = {
-                "mean": statistics.mean(metrics["depth_values"]),
-                "median": statistics.median(metrics["depth_values"]),
-                "min": min(metrics["depth_values"]),
-                "max": max(metrics["depth_values"])
+                "mean": statistics.mean(depth_values),
+                "median": statistics.median(depth_values),
+                "min": min(depth_values),
+                "max": max(depth_values)
             }
             
         # Ts/Tv ratio
-        ts_count = metrics.get("ts_count", 0)
-        tv_count = metrics.get("tv_count", 0)
+        ts_count = int(metrics.get("ts_count", 0))
+        tv_count = int(metrics.get("tv_count", 0))
         if tv_count > 0:
             summary["ts_tv_ratio"] = ts_count / tv_count
             

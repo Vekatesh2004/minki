@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# User uploads and generated data (do not commit patient/genomic data)
+uploads/
+results/
+*.db
+
+# Local VCF test data (keep only examples/)
+*.vcf
+*.vcf.gz
+!examples/*.vcf
+!examples/*.vcf.gz
+
+# Env / secrets
+.env
+*.pem
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
