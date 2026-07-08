@@ -543,7 +543,10 @@ function renderResults(r) {
 
     // Drugs
     html += '<div class="card"><h2>Drug Interactions</h2>';
-    html += '<p style="font-size:13px;color:#6b7280;">Click a database link to confirm each gene\\u2013drug relationship on an authoritative source.</p>';
+    html += '<p style="font-size:13px;color:#6b7280;">Evidence comes from PharmGKB clinical annotations. ' +
+            'Click <b>PharmGKB</b> to open the exact annotation page and confirm the gene\\u2013drug association. ' +
+            'Levels: <b style="color:#059669;">1A/1B</b> strongest, <b style="color:#2563eb;">2A/2B</b> moderate, ' +
+            '<b style="color:#d97706;">3/4</b> lower. <i>no_pgx_evidence</i> = no PharmGKB clinical annotation found for that pair.</p>';
     if ((r.drug_results || []).length === 0) {
         html += '<p>No drug interactions found.</p>';
     } else {
@@ -556,14 +559,21 @@ function renderResults(r) {
             (dr.matched_drugs || []).forEach(d => {
                 var name = d.drug_name || '-';
                 var q = encodeURIComponent(gene + ' ' + name);
-                // PharmGKB clinical annotation search for the gene+drug pair
-                var pgkb = 'https://www.pharmgkb.org/search?query=' + q;
+                // Prefer the exact PharmGKB clinical annotation page if we have one,
+                // otherwise fall back to a gene+drug search.
+                var pgkb = d.pharmgkb_url || ('https://www.pharmgkb.org/search?query=' + q);
                 // DrugBank drug search
                 var db = 'https://go.drugbank.com/unearth/q?searcher=drugs&query=' + encodeURIComponent(name);
                 var links = '<a href="' + pgkb + '" target="_blank">PharmGKB</a> | ' +
                             '<a href="' + db + '" target="_blank">DrugBank</a>';
+                // Colour-code the evidence level
+                var ev = d.evidence_level || 'no_pgx_evidence';
+                var evColor = ev.indexOf('1') > -1 ? '#059669' :
+                              ev.indexOf('2') > -1 ? '#2563eb' :
+                              ev.indexOf('3') > -1 || ev.indexOf('4') > -1 ? '#d97706' : '#6b7280';
+                var evCell = '<span style="color:' + evColor + ';font-weight:600;">' + ev + '</span>';
                 html += '<tr><td>' + name + '</td><td>' + (d.action||'-') +
-                        '</td><td>' + (d.evidence_level||'-') + '</td><td>' + links + '</td></tr>';
+                        '</td><td>' + evCell + '</td><td>' + links + '</td></tr>';
             });
             html += '</table>';
         });
@@ -584,4 +594,9 @@ function metric(val, label) {
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("simple_backend:app", host="127.0.0.1", port=8000, reload=True)
+    # Configurable via env vars for production deployment.
+    # HOST=0.0.0.0 to accept external traffic (behind nginx), RELOAD=0 in prod.
+    host = os.getenv("HOST", "127.0.0.1")
+    port = int(os.getenv("PORT", "8000"))
+    reload = os.getenv("RELOAD", "1") == "1"
+    uvicorn.run("simple_backend:app", host=host, port=port, reload=reload)

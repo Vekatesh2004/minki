@@ -1,0 +1,19 @@
+[Unit]
+Description=Pharmacogenomics Pipeline (FastAPI)
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/minki
+Environment=HOST=127.0.0.1
+Environment=PORT=8000
+Environment=RELOAD=0
+Environment=MAX_VARIANTS_TO_VEP=300
+# Use the venv's python; adjust path if your venv lives elsewhere
+ExecStart=/home/ubuntu/minki/venv/bin/python /home/ubuntu/minki/simple_backend.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

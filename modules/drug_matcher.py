@@ -263,43 +263,66 @@ class DrugMatcher:
         return drugs
         
     async def _search_pharmgkb(self, gene_symbol: str, hgvsp: Optional[str]) -> List[Dict[str, Any]]:
-        """Search PharmGKB for pharmacogenomic annotations"""
-        
+        """Search PharmGKB clinical annotations for a gene.
+
+        The public PharmGKB API expects the gene to be referenced through
+        `location.genes.symbol` and `view=max` to expand related chemicals and
+        the level of evidence. One clinical annotation can reference several
+        drugs, so we emit one record per (annotation, drug).
+        """
+
         annotations = []
-        
+
         try:
-            # Search for gene-drug associations
             search_url = f"{self.pharmgkb_base_url}/data/clinicalAnnotation"
+            # Note: we deliberately do NOT use view=max. The default view already
+            # includes levelOfEvidence and relatedChemicals, and is small enough
+            # to download reliably. view=max returns a very large payload that can
+            # time out mid-download.
             params = {
-                'gene': gene_symbol,
-                'format': 'json'
+                "location.genes.symbol": gene_symbol,
             }
-            
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
                 async with session.get(search_url, params=params) as response:
-                    
+
                     if response.status == 200:
                         data = await response.json()
-                        clinical_annotations = data.get('data', [])
-                        
+                        clinical_annotations = data.get("data", [])
+
                         for annotation in clinical_annotations:
-                            ann_info = {
-                                "gene": annotation.get('gene'),
-                                "variant": annotation.get('variant'),
-                                "drug": annotation.get('drug'),
-                                "phenotype": annotation.get('phenotype'),
-                                "evidence_level": annotation.get('evidenceLevel'),
-                                "pmid": annotation.get('pmid'),
-                                "source": "pharmgkb"
-                            }
-                            annotations.append(ann_info)
-                            
-                    elif response.status != 404:  # 404 is expected if no data found
+                            # Level of evidence, e.g. "1A", "2A", "3"
+                            loe = annotation.get("levelOfEvidence") or {}
+                            level_term = loe.get("term")
+
+                            # Variant/allele label
+                            variant_label = annotation.get("name")
+
+                            # Direct PharmGKB link for confirmation
+                            acc = annotation.get("accessionId")
+                            url = (f"https://www.pharmgkb.org/clinicalAnnotation/{acc}"
+                                   if acc else None)
+
+                            # One clinical annotation can involve multiple drugs
+                            chemicals = annotation.get("relatedChemicals", []) or []
+                            for chem in chemicals:
+                                annotations.append({
+                                    "gene": gene_symbol,
+                                    "variant": variant_label,
+                                    "drug": chem.get("name"),
+                                    "phenotype": annotation.get("phenotypeCategory"),
+                                    "evidence_level": level_term,
+                                    "score": annotation.get("score"),
+                                    "url": url,
+                                    "source": "pharmgkb",
+                                })
+
+                    elif response.status != 404:
                         logger.warning(f"PharmGKB API error: {response.status}")
-                        
+
         except Exception as e:
             logger.error(f"Error searching PharmGKB: {str(e)}")
-            
+
         return annotations
         
     def _combine_drug_results(self, cached_drugs: List[Dict[str, Any]], 
@@ -345,53 +368,50 @@ class DrugMatcher:
                 
         # Score and rank drugs
         scored_drugs = []
-        
+
+        # PharmGKB level -> (score, normalized label). Levels: 1A,1B,2A,2B,3,4
+        level_scores = {
+            "1a": (50, "1A"), "1b": (45, "1B"),
+            "2a": (35, "2A"), "2b": (30, "2B"),
+            "3": (20, "3"), "4": (10, "4"),
+        }
+
         for drug in drugs:
             drug_name = drug.get('drug_name', '').lower()
-            score = 0
+            score = 10  # base score for having a drug-target relationship
             evidence_level = "no_pgx_evidence"
-            
-            # Base score for having drug-target relationship
-            score += 10
-            
-            # Bonus for PharmGKB evidence
+            best_rank = -1
+
             if drug_name in pharmgkb_map:
                 pgx_annotations = pharmgkb_map[drug_name]
-                
-                # Find best evidence level
+
                 for annotation in pgx_annotations:
-                    ann_evidence = annotation.get('evidence_level', '')
-                    if 'level 1' in ann_evidence.lower():
-                        score += 50
-                        evidence_level = "level_1"
-                    elif 'level 2' in ann_evidence.lower():
-                        score += 30
-                        evidence_level = "level_2" 
-                    elif 'level 3' in ann_evidence.lower():
-                        score += 20
-                        evidence_level = "level_3"
-                    elif 'level 4' in ann_evidence.lower():
-                        score += 10
-                        evidence_level = "level_4"
-                        
-                # Add PharmGKB annotations to drug info
+                    term = str(annotation.get('evidence_level') or '').lower().strip()
+                    if term in level_scores:
+                        add_score, label = level_scores[term]
+                        if add_score > best_rank:
+                            best_rank = add_score
+                            score = 10 + add_score
+                            evidence_level = f"PharmGKB Level {label}"
+                    elif best_rank < 0:
+                        # Annotation exists but level is unusual/unspecified
+                        evidence_level = "PharmGKB (level n/a)"
+
+                # Attach the PharmGKB annotations (with confirmation URLs) to the drug
                 drug['pharmgkb_annotations'] = pgx_annotations
-                
-            # Bonus for specific variant match (if implemented in future)
-            if hgvsp and drug_name in pharmgkb_map:
-                for annotation in pharmgkb_map[drug_name]:
-                    variant = annotation.get('variant', '')
-                    if hgvsp in variant:
-                        score += 100  # High bonus for exact variant match
-                        evidence_level = "variant_specific"
-                        
+                # Surface the best confirmation URL directly on the drug
+                for annotation in pgx_annotations:
+                    if annotation.get('url'):
+                        drug['pharmgkb_url'] = annotation['url']
+                        break
+
             drug['evidence_score'] = score
             drug['evidence_level'] = evidence_level
             scored_drugs.append(drug)
-            
+
         # Sort by score (descending)
         scored_drugs.sort(key=lambda x: x['evidence_score'], reverse=True)
-        
+
         return scored_drugs
         
     async def cache_drug_data(self, drug_data: List[Dict[str, Any]]):
