@@ -1,0 +1,226 @@
+{% extends "base.html" %}
+
+{% block title %}Upload VCF File - Pharmacogenomics Pipeline{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-lg-8 mx-auto">
+        <div class="card">
+            <div class="card-header bg-primary text-white">
+                <h4 class="mb-0">
+                    <i class="fas fa-upload"></i> Upload VCF File for Analysis
+                </h4>
+            </div>
+            <div class="card-body">
+                <form method="post" enctype="multipart/form-data" id="uploadForm">
+                    <!-- Sample ID -->
+                    <div class="mb-3">
+                        <label for="sample_id" class="form-label">
+                            <i class="fas fa-tag"></i> Sample ID *
+                        </label>
+                        <input type="text" class="form-control" id="sample_id" name="sample_id" 
+                               placeholder="Enter sample identifier (e.g., SAMPLE_001)" required>
+                        <div class="form-text">
+                            Provide a unique identifier for this sample
+                        </div>
+                    </div>
+
+                    <!-- File Upload -->
+                    <div class="mb-3">
+                        <label for="vcf_file" class="form-label">
+                            <i class="fas fa-file-medical"></i> VCF File *
+                        </label>
+                        <input type="file" class="form-control" id="vcf_file" name="vcf_file" 
+                               accept=".vcf,.vcf.gz" required>
+                        <div class="form-text">
+                            Supported formats: .vcf, .vcf.gz (max 50MB)
+                        </div>
+                    </div>
+
+                    <!-- Analysis Options -->
+                    <div class="mb-3">
+                        <label class="form-label">
+                            <i class="fas fa-cogs"></i> Analysis Type
+                        </label>
+                        <div class="form-check">
+                            <input class="form-check-input" type="radio" name="analysis_type" 
+                                   id="basic_analysis" value="basic" checked>
+                            <label class="form-check-label" for="basic_analysis">
+                                <strong>Basic Analysis</strong> - VCF QC + Known pharmacogenes
+                            </label>
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input" type="radio" name="analysis_type" 
+                                   id="full_analysis" value="full">
+                            <label class="form-check-label" for="full_analysis">
+                                <strong>Full Analysis</strong> - Complete pipeline with reports
+                            </label>
+                        </div>
+                    </div>
+
+                    <!-- File Upload Progress -->
+                    <div id="uploadProgress" class="mb-3" style="display: none;">
+                        <div class="progress">
+                            <div class="progress-bar progress-bar-striped progress-bar-animated" 
+                                 role="progressbar" style="width: 0%"></div>
+                        </div>
+                        <div class="text-center mt-2">
+                            <small class="text-muted">Uploading file...</small>
+                        </div>
+                    </div>
+
+                    <!-- Submit Button -->
+                    <div class="d-grid">
+                        <button type="submit" class="btn btn-primary btn-lg" id="submitBtn">
+                            <i class="fas fa-upload"></i> Upload and Analyze
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Information Cards -->
+        <div class="row mt-4">
+            <div class="col-md-6 mb-3">
+                <div class="card border-info">
+                    <div class="card-header bg-info text-white">
+                        <h6 class="mb-0">
+                            <i class="fas fa-info-circle"></i> VCF File Requirements
+                        </h6>
+                    </div>
+                    <div class="card-body">
+                        <ul class="mb-0">
+                            <li>Standard VCF format (v4.0+)</li>
+                            <li>Human genome variants (GRCh37/38)</li>
+                            <li>Maximum file size: 50MB</li>
+                            <li>Compressed files (.vcf.gz) supported</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-md-6 mb-3">
+                <div class="card border-success">
+                    <div class="card-header bg-success text-white">
+                        <h6 class="mb-0">
+                            <i class="fas fa-chart-line"></i> Analysis Features
+                        </h6>
+                    </div>
+                    <div class="card-body">
+                        <ul class="mb-0">
+                            <li>Quality control metrics</li>
+                            <li>Pharmacogene variant detection</li>
+                            <li>Drug interaction predictions</li>
+                            <li>Clinical significance assessment</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Example Data -->
+        <div class="card mt-4">
+            <div class="card-header bg-secondary text-white">
+                <h6 class="mb-0">
+                    <i class="fas fa-download"></i> Don't have a VCF file?
+                </h6>
+            </div>
+            <div class="card-body">
+                <p class="mb-2">
+                    Try our demo with example pharmacogenomic variants, or download a sample VCF file:
+                </p>
+                <div class="btn-group">
+                    <a href="{{ url_for('demo') }}" class="btn btn-outline-success">
+                        <i class="fas fa-play-circle"></i> Run Demo
+                    </a>
+                    <a href="{{ url_for('static', filename='examples/sample_pharmacogenomics.vcf') }}" 
+                       class="btn btn-outline-primary" download>
+                        <i class="fas fa-download"></i> Download Sample VCF
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+$(document).ready(function() {
+    // File upload form handling
+    $('#uploadForm').on('submit', function(e) {
+        e.preventDefault();
+        
+        const formData = new FormData(this);
+        const submitBtn = $('#submitBtn');
+        const progressDiv = $('#uploadProgress');
+        const progressBar = $('.progress-bar');
+        
+        // Validate file
+        const fileInput = document.getElementById('vcf_file');
+        const file = fileInput.files[0];
+        
+        if (!file) {
+            alert('Please select a VCF file');
+            return;
+        }
+        
+        // Check file size (50MB limit)
+        if (file.size > 50 * 1024 * 1024) {
+            alert('File size exceeds 50MB limit');
+            return;
+        }
+        
+        // Check file extension
+        const fileName = file.name.toLowerCase();
+        if (!fileName.endsWith('.vcf') && !fileName.endsWith('.vcf.gz')) {
+            alert('Please upload a VCF file (.vcf or .vcf.gz)');
+            return;
+        }
+        
+        // Show progress and disable submit
+        submitBtn.prop('disabled', true);
+        progressDiv.show();
+        
+        // Simulate progress (since we're using regular form upload)
+        let progress = 0;
+        const progressInterval = setInterval(function() {
+            progress += Math.random() * 10;
+            if (progress > 90) progress = 90;
+            progressBar.css('width', progress + '%');
+        }, 200);
+        
+        // Submit form normally
+        setTimeout(function() {
+            clearInterval(progressInterval);
+            progressBar.css('width', '100%');
+            document.getElementById('uploadForm').submit();
+        }, 1000);
+    });
+    
+    // File input change handler
+    $('#vcf_file').on('change', function() {
+        const file = this.files[0];
+        if (file) {
+            const fileSize = (file.size / 1024 / 1024).toFixed(2);
+            $(this).next('.form-text').html(
+                `Selected: ${file.name} (${fileSize} MB)<br>` +
+                'Supported formats: .vcf, .vcf.gz (max 50MB)'
+            );
+        }
+    });
+    
+    // Analysis type change handler
+    $('input[name="analysis_type"]').on('change', function() {
+        const analysisType = $(this).val();
+        const submitBtn = $('#submitBtn');
+        
+        if (analysisType === 'basic') {
+            submitBtn.html('<i class="fas fa-upload"></i> Upload and Analyze (Basic)');
+        } else if (analysisType === 'full') {
+            submitBtn.html('<i class="fas fa-upload"></i> Upload and Analyze (Full)');
+        }
+    });
+});
+</script>
+{% endblock %}

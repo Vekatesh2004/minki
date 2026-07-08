@@ -1,0 +1,31 @@
+{
+  "ensembl_vep": {
+    "base_url": "https://rest.ensembl.org/vep/human/region",
+    "rate_limit_delay": 0.1
+  },
+  "uniprot": {
+    "base_url": "https://rest.uniprot.org",
+    "id_mapping_url": "https://rest.uniprot.org/idmapping"
+  },
+  "alphafold": {
+    "base_url": "https://alphafold.ebi.ac.uk/files",
+    "model_pattern": "AF-{uniprot_id}-F1-model_v4.pdb"
+  },
+  "drugbank": {
+    "api_url": "https://go.drugbank.com/api/v1",
+    "api_key": "your_api_key_here",
+    "rate_limit_delay": 1.0
+  },
+  "pharmgkb": {
+    "base_url": "https://api.pharmgkb.org/v1"
+  },
+  "qc_thresholds": {
+    "min_qual": 30,
+    "min_depth": 10,
+    "max_missing_rate": 0.1
+  },
+  "output": {
+    "formats": ["json", "html"],
+    "include_structures": true
+  }
+}

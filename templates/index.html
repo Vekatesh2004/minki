@@ -1,0 +1,211 @@
+{% extends "base.html" %}
+
+{% block title %}Pharmacogenomics Pipeline - Home{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-lg-8 mx-auto">
+        <!-- Hero Section -->
+        <div class="text-center mb-5">
+            <h1 class="display-4 text-primary">
+                <i class="fas fa-dna"></i> Pharmacogenomics Analysis
+            </h1>
+            <p class="lead">
+                Analyze genetic variants to predict drug interactions and optimize medication selection
+            </p>
+        </div>
+
+        <!-- Feature Cards -->
+        <div class="row mb-5">
+            <div class="col-md-4 mb-4">
+                <div class="card h-100 border-primary">
+                    <div class="card-body text-center">
+                        <i class="fas fa-file-medical fa-3x text-primary mb-3"></i>
+                        <h5 class="card-title">VCF Analysis</h5>
+                        <p class="card-text">
+                            Parse and analyze VCF files with comprehensive quality control metrics
+                        </p>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="col-md-4 mb-4">
+                <div class="card h-100 border-success">
+                    <div class="card-body text-center">
+                        <i class="fas fa-pills fa-3x text-success mb-3"></i>
+                        <h5 class="card-title">Drug Interactions</h5>
+                        <p class="card-text">
+                            Match genetic variants to drug interactions using DrugBank and PharmGKB
+                        </p>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="col-md-4 mb-4">
+                <div class="card h-100 border-info">
+                    <div class="card-body text-center">
+                        <i class="fas fa-chart-line fa-3x text-info mb-3"></i>
+                        <h5 class="card-title">Clinical Reports</h5>
+                        <p class="card-text">
+                            Generate comprehensive reports with clinical significance assessments
+                        </p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Action Buttons -->
+        <div class="row mb-5">
+            <div class="col-md-6 mb-3">
+                <div class="card bg-light">
+                    <div class="card-body text-center">
+                        <h5 class="card-title">
+                            <i class="fas fa-upload text-primary"></i> Upload Your VCF
+                        </h5>
+                        <p class="card-text">
+                            Upload your VCF file for comprehensive pharmacogenomics analysis
+                        </p>
+                        <a href="{{ url_for('upload_file') }}" class="btn btn-primary btn-lg">
+                            <i class="fas fa-upload"></i> Start Analysis
+                        </a>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="col-md-6 mb-3">
+                <div class="card bg-light">
+                    <div class="card-body text-center">
+                        <h5 class="card-title">
+                            <i class="fas fa-play-circle text-success"></i> Try the Demo
+                        </h5>
+                        <p class="card-text">
+                            Explore the pipeline with example pharmacogenomic variants
+                        </p>
+                        <a href="{{ url_for('demo') }}" class="btn btn-success btn-lg">
+                            <i class="fas fa-play-circle"></i> Run Demo
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Pipeline Overview -->
+        <div class="card mb-5">
+            <div class="card-header bg-primary text-white">
+                <h5 class="mb-0">
+                    <i class="fas fa-sitemap"></i> Analysis Pipeline
+                </h5>
+            </div>
+            <div class="card-body">
+                <div class="row text-center">
+                    <div class="col-lg-2 col-md-4 col-6 mb-3">
+                        <div class="pipeline-step">
+                            <div class="step-icon bg-primary text-white rounded-circle mx-auto mb-2">
+                                <i class="fas fa-file-upload"></i>
+                            </div>
+                            <small>VCF Upload</small>
+                        </div>
+                    </div>
+                    <div class="col-lg-2 col-md-4 col-6 mb-3">
+                        <div class="pipeline-step">
+                            <div class="step-icon bg-success text-white rounded-circle mx-auto mb-2">
+                                <i class="fas fa-check-circle"></i>
+                            </div>
+                            <small>Quality Control</small>
+                        </div>
+                    </div>
+                    <div class="col-lg-2 col-md-4 col-6 mb-3">
+                        <div class="pipeline-step">
+                            <div class="step-icon bg-info text-white rounded-circle mx-auto mb-2">
+                                <i class="fas fa-dna"></i>
+                            </div>
+                            <small>Variant Annotation</small>
+                        </div>
+                    </div>
+                    <div class="col-lg-2 col-md-4 col-6 mb-3">
+                        <div class="pipeline-step">
+                            <div class="step-icon bg-warning text-white rounded-circle mx-auto mb-2">
+                                <i class="fas fa-cube"></i>
+                            </div>
+                            <small>Protein Structure</small>
+                        </div>
+                    </div>
+                    <div class="col-lg-2 col-md-4 col-6 mb-3">
+                        <div class="pipeline-step">
+                            <div class="step-icon bg-danger text-white rounded-circle mx-auto mb-2">
+                                <i class="fas fa-pills"></i>
+                            </div>
+                            <small>Drug Matching</small>
+                        </div>
+                    </div>
+                    <div class="col-lg-2 col-md-4 col-6 mb-3">
+                        <div class="pipeline-step">
+                            <div class="step-icon bg-secondary text-white rounded-circle mx-auto mb-2">
+                                <i class="fas fa-file-alt"></i>
+                            </div>
+                            <small>Report Generation</small>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Supported Pharmacogenes -->
+        <div class="card mb-5">
+            <div class="card-header bg-success text-white">
+                <h5 class="mb-0">
+                    <i class="fas fa-list-ul"></i> Supported Pharmacogenes
+                </h5>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-6">
+                        <ul class="list-unstyled">
+                            <li><i class="fas fa-check text-success"></i> <strong>CYP2D6</strong> - Codeine, Tramadol, Metoprolol</li>
+                            <li><i class="fas fa-check text-success"></i> <strong>CYP2C19</strong> - Clopidogrel, Omeprazole</li>
+                            <li><i class="fas fa-check text-success"></i> <strong>CYP2C9</strong> - Warfarin, Phenytoin</li>
+                        </ul>
+                    </div>
+                    <div class="col-md-6">
+                        <ul class="list-unstyled">
+                            <li><i class="fas fa-check text-success"></i> <strong>TPMT</strong> - Azathioprine, Mercaptopurine</li>
+                            <li><i class="fas fa-check text-success"></i> <strong>DPYD</strong> - Fluorouracil, Capecitabine</li>
+                            <li><i class="fas fa-check text-success"></i> <strong>VKORC1</strong> - Warfarin sensitivity</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Disclaimer -->
+        <div class="alert alert-warning">
+            <i class="fas fa-exclamation-triangle"></i>
+            <strong>Important:</strong> This tool is for research purposes only and should not be used for clinical 
+            decision-making without proper validation and consultation with healthcare professionals.
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+// Check system status on page load
+$(document).ready(function() {
+    checkSystemStatus();
+});
+
+function checkSystemStatus() {
+    $.get('/api/status')
+        .done(function(data) {
+            if (data.status === 'active' && data.pipeline_initialized) {
+                $('#status-indicator').html('<span class="text-success">System Ready</span>');
+            } else {
+                $('#status-indicator').html('<span class="text-warning">Initializing...</span>');
+            }
+        })
+        .fail(function() {
+            $('#status-indicator').html('<span class="text-danger">System Error</span>');
+        });
+}
+</script>
+{% endblock %}

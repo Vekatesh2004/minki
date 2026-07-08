@@ -1,0 +1,12 @@
+# Minimal requirements for local testing
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+requests>=2.31.0
+pandas>=2.0.0
+python-dotenv>=1.0.0
+
+# Optional: for full functionality
+# cyvcf2>=0.30.0
+# biopython>=1.81
+# aiohttp>=3.8.0

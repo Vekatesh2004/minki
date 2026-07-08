@@ -1,0 +1,109 @@
+PHARMACOGENOMICS MCP PIPELINE — PROJECT PLAN
+================================================
+
+STACK
+-----
+- Variant annotation: Ensembl VEP (REST API or local install w/ cache)
+- Protein sequence/domains: UniProt (REST API, Ensembl xrefs for gene -> UniProt mapping)
+- Structure: AlphaFold DB (EBI) as primary source (guarantees coverage even without a solved PDB structure)
+- Drug matching: DrugBank full dataset (licensed XML) + DrugBank API
+- Orchestration: MCP server (Python MCP SDK), used from Kiro
+
+VCF -> QC -> Gene/Consequence annotation (VEP) -> Amino acid change (HGVSp)
+-> UniProt/AlphaFold structure mapping -> DrugBank gene-target matching -> Report
+
+
+PHASE 0 — SETUP
+---------------
+1. Install dependencies: cyvcf2, biopython, requests, py3Dmol (or nglview) for VCF/structure work.
+2. Register DrugBank XML dump locally. Parse the full XML once into a local SQLite/JSON index
+   (repeated live API calls are too slow/rate-limited for gene-target lookups). Keep API access
+   for on-demand drug detail lookups on matched hits only.
+3. Scaffold MCP server (Python MCP SDK), stdio transport for local Kiro use.
+4. Store config: Ensembl VEP endpoint, UniProt base URL, AlphaFold DB base URL, DrugBank XML
+   path + API key.
+
+PHASE 1 — VCF PARSING & QC  (tool: parse_vcf)
+----------------------------------------------
+5. Parse with cyvcf2: pull CHROM/POS/REF/ALT/QUAL/FILTER/INFO/FORMAT per record.
+6. Compute QC metrics: %PASS, QUAL distribution, mean depth, Ts/Tv ratio, missing genotype
+   rate, het/hom ratio.
+7. Tag each variant high_confidence / low_confidence based on QUAL+DP thresholds (configurable).
+8. Return structured JSON: { variants: [...], qc_summary: {...} }.
+
+PHASE 2 — VEP ANNOTATION  (tool: annotate_variants)
+----------------------------------------------------
+9. Batch-submit variants to Ensembl VEP REST (/vep/human/region) — batch, don't loop
+   one-by-one, to respect rate limits.
+10. Extract per-variant: gene symbol, Ensembl gene/transcript ID, consequence terms, canonical
+    transcript flag, HGVSc/HGVSp notation.
+11. Filter to coding consequences (missense / stop_gained / stop_lost / frameshift /
+    inframe_indel / synonymous) as candidates for the amino-acid-level + structure steps.
+12. Use VEP's own HGVSp output as the primary amino-acid-change source (e.g. p.Arg144Cys) —
+    no need to hand-roll codon translation unless VEP lacks it for an indel edge case.
+
+PHASE 3 — GENE -> UNIPROT -> ALPHAFOLD STRUCTURE  (tool: get_protein_structure)
+---------------------------------------------------------------------------------
+13. Map Ensembl gene/transcript ID -> UniProt accession (Ensembl xrefs endpoint, or UniProt's
+    ID mapping API).
+14. Fetch UniProt entry: canonical sequence, domain/feature annotations (ft_domain, ft_binding,
+    etc.).
+15. Fetch AlphaFold model:
+    https://alphafold.ebi.ac.uk/files/AF-{UNIPROT}-F1-model_v4.pdb
+    (and its per-residue pLDDT confidence scores).
+16. Align the variant's HGVSp residue position to UniProt canonical numbering (should match
+    directly if the canonical transcript was used in VEP — validate, don't assume).
+17. Check if the mutated residue falls in a UniProt-annotated domain/binding/active site —
+    flag it.
+18. Generate a highlighted structure output: color the mutated residue distinctly (py3Dmol
+    script, or a modified PDB with occupancy/B-factor marking) and export as an image or
+    interactive HTML snippet.
+19. Include the pLDDT confidence score at that residue so users know how reliable the
+    AlphaFold model is at that position.
+
+PHASE 4 — DRUGBANK MATCHING  (tool: match_drugs)
+---------------------------------------------------
+20. Pre-parse DrugBank XML once into a local index:
+    gene_symbol / UniProt_ID -> [drug_id, drug_name, action, pharmacology]
+21. For each mutated gene, look up matching drugs where it's a target/enzyme/transporter/carrier.
+22. Pull additional drug detail (mechanism, approval status, indication) via the DrugBank API
+    for matched hits only (avoids exhausting rate limits).
+23. Cross-check against PharmGKB clinical annotations where available — DrugBank tells you the
+    gene is a target; PharmGKB tells you that a specific variant changes drug response. Worth
+    adding as a lightweight lookup since DrugBank alone won't have variant-level PGx guidance.
+24. Rank output: exact variant-drug PGx evidence > gene-target match only.
+
+PHASE 5 — REPORT ASSEMBLY  (tool: generate_report)
+-----------------------------------------------------
+25. Merge outputs per variant: QC flag -> gene/consequence -> HGVSp -> structure image +
+    domain flag -> ranked drug list.
+26. Export as JSON (programmatic use) and HTML (human-readable, embeds structure viewer +
+    tables).
+27. Include a top-level QC dashboard section (from Phase 1) separate from the per-variant
+    table.
+
+PHASE 6 — MCP TOOL CONTRACTS
+--------------------------------
+  Tool                    | Input                  | Output
+  ------------------------|------------------------|---------------------------------------------
+  parse_vcf               | file_path               | variants[], qc_summary
+  annotate_variants       | variants[]              | annotated_variants[] (gene, HGVSp, consequence)
+  get_protein_structure   | uniprot_id, residue_pos | structure_file, highlighted_view, pLDDT, domain_flag
+  match_drugs             | gene_symbol, hgvsp      | ranked_drugs[]
+  generate_report         | sample_id               | full_report (json/html)
+
+PHASE 7 — VALIDATION
+------------------------
+28. Test end-to-end on known PGx cases: CYP2D6, CYP2C19, VKORC1, TPMT, DPYD variants — these
+    have well-documented DrugBank/PharmGKB entries, so every stage can be sanity-checked at
+    once.
+29. Confirm residue-numbering alignment (VEP HGVSp vs UniProt vs AlphaFold PDB) doesn't
+    drift — this is the most common silent-bug source in this kind of pipeline.
+30. Add graceful fallbacks: gene with no AlphaFold model, no DrugBank match, VEP annotation
+    failure.
+
+NOTE ON LICENSING
+---------------------
+DrugBank's license terms restrict redistribution and certain automated-use patterns. Check
+your license tier against how this pipeline will be run/served (local tool vs. any
+shared/hosted service) before wiring up bulk XML parsing.
