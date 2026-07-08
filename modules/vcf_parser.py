@@ -91,9 +91,16 @@ class VCFParser:
                 qc_metrics["pass_variants"] += 1
                 
             # Depth information (if available)
+            # cyvcf2's variant.format('DP') returns a 2D numpy array
+            # (samples x values); flatten to a single plain int.
             dp_values = variant.format('DP') if 'DP' in variant.FORMAT else None
             if dp_values is not None and len(dp_values) > 0:
-                depth = dp_values[0] if dp_values[0] is not None else 0
+                try:
+                    import numpy as _np
+                    flat = _np.ravel(dp_values)
+                    depth = int(flat[0]) if flat.size > 0 and flat[0] is not None else 0
+                except Exception:
+                    depth = 0
                 var_info["depth"] = depth
                 qc_metrics["depth_values"].append(depth)
                 
