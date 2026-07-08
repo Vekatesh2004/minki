@@ -34,6 +34,7 @@ try:
     from modules.vep_annotator import VEPAnnotator
     from modules.protein_structure import ProteinStructureAnalyzer
     from modules.drug_matcher import DrugMatcher
+    from modules import diabetes_kb
     modules_available = True
     module_import_error = None
 except Exception as e:  # catch ImportError AND any error raised at import time
@@ -312,6 +313,33 @@ async def analyze_file(upload_id: str, file_path: str, sample_id: str):
             except (asyncio.TimeoutError, Exception):
                 continue
 
+        # ---- Mutation-type breakdown (for charts) -----------------------------
+        mutation_type_counts = {}
+        for m in mutations:
+            for term in (m.get("consequence_terms") or ["unknown"]):
+                mutation_type_counts[term] = mutation_type_counts.get(term, 0) + 1
+
+        # ---- Diabetes interpretation ------------------------------------------
+        diabetes_findings = []
+        for m in mutations:
+            gene = m.get("gene_symbol")
+            kb = diabetes_kb.lookup(gene)
+            if kb:
+                diabetes_findings.append({
+                    "gene_symbol": gene,
+                    "position": m.get("position"),
+                    "change": f"{m.get('ref')}>{m.get('alt')}",
+                    "consequence_terms": m.get("consequence_terms", []),
+                    "amino_acid_change": m.get("hgvsp") or m.get("amino_acid_change"),
+                    "category": kb["category"],
+                    "role": kb["role"],
+                    "significance": kb["significance"],
+                    "treatment": kb["treatment"],
+                    "pharmgkb_url": kb["pharmgkb_url"],
+                    "omim_url": kb["omim_url"],
+                    "gwas_url": kb["gwas_url"],
+                })
+
         # ---- Assemble results -------------------------------------------------
         results = {
             "sample_id": sample_id,
@@ -320,10 +348,12 @@ async def analyze_file(upload_id: str, file_path: str, sample_id: str):
             "variants_annotated": len(annotated),
             "annotation_capped": total_variants > len(to_annotate),
             "mutations": mutations,
+            "mutation_type_counts": mutation_type_counts,
             "coding_mutation_count": len(mutations),
             "genes_with_coding_variants": list(genes_seen.keys()),
             "structures": structures,
             "drug_results": drug_results,
+            "diabetes_findings": diabetes_findings,
             "summary": {
                 "total_variants": total_variants,
                 "variants_annotated": len(annotated),
@@ -331,6 +361,7 @@ async def analyze_file(upload_id: str, file_path: str, sample_id: str):
                 "genes_affected": len(genes_seen),
                 "structures_resolved": len([s for s in structures if not s.get("error")]),
                 "drug_matches": sum(len(r.get("matched_drugs", [])) for r in drug_results),
+                "diabetes_genes_found": len(diabetes_findings),
             },
         }
 
@@ -360,6 +391,39 @@ async def get_analysis_status(upload_id: str):
         "created_at": a.created_at,
         "results": a.results,
     }
+
+
+@app.get("/api/analysis/{upload_id}/mutations.csv")
+async def download_mutations_csv(upload_id: str):
+    """Download the identified mutations as a CSV file."""
+    if upload_id not in analysis_storage:
+        raise HTTPException(status_code=404, detail="Analysis not found")
+    a = analysis_storage[upload_id]
+    if not a.results:
+        raise HTTPException(status_code=400, detail="Analysis not complete")
+
+    import csv, io
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow([
+        "position", "ref", "alt", "gene_symbol", "consequence_terms",
+        "hgvsc", "hgvsp", "amino_acid_change", "diabetes_gene",
+    ])
+    for m in a.results.get("mutations", []):
+        writer.writerow([
+            m.get("position"), m.get("ref"), m.get("alt"), m.get("gene_symbol"),
+            "|".join(m.get("consequence_terms") or []),
+            m.get("hgvsc"), m.get("hgvsp"), m.get("amino_acid_change"),
+            "yes" if diabetes_kb.is_diabetes_gene(m.get("gene_symbol")) else "no",
+        ])
+
+    from fastapi.responses import Response
+    fname = f"{a.results.get('sample_id', 'sample')}_mutations.csv"
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={fname}"},
+    )
 
 
 if Path("results").exists():
@@ -424,6 +488,7 @@ INDEX_HTML = """
 
 <script>
 let pollTimer = null;
+let currentAnalysisId = null;
 
 document.getElementById('uploadForm').addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -444,6 +509,7 @@ document.getElementById('uploadForm').addEventListener('submit', async (e) => {
         const res = await fetch('/api/upload', { method: 'POST', body: fd });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || 'Upload failed');
+        currentAnalysisId = data.upload_id;
         pollStatus(data.upload_id);
     } catch (err) {
         setProgress(0, 'Error: ' + err.message);
@@ -499,21 +565,75 @@ function renderResults(r) {
     }
     html += '</div>';
 
-    // Mutations table
+    // Mutation-type chart
+    html += '<div class="card"><h2>Mutation Types</h2>';
+    var mtc = r.mutation_type_counts || {};
+    var types = Object.keys(mtc);
+    if (types.length === 0) {
+        html += '<p>No coding mutation types to chart.</p>';
+    } else {
+        var maxCount = Math.max.apply(null, types.map(function(t){return mtc[t];}));
+        types.sort(function(a,b){return mtc[b]-mtc[a];});
+        types.forEach(function(t){
+            var pct = Math.round(mtc[t] / maxCount * 100);
+            html += '<div style="margin:6px 0;">' +
+                    '<div style="font-size:12px;margin-bottom:2px;">' + t + ' (' + mtc[t] + ')</div>' +
+                    '<div style="background:#e5e7eb;border-radius:4px;">' +
+                    '<div style="width:' + pct + '%;background:#3b82f6;color:white;font-size:11px;' +
+                    'padding:2px 6px;border-radius:4px;">' + mtc[t] + '</div></div></div>';
+        });
+    }
+    html += '</div>';
+
+    // Mutations table + download
     html += '<div class="card"><h2>Coding Mutations</h2>';
+    if (currentAnalysisId) {
+        html += '<p><a href="/api/analysis/' + currentAnalysisId + '/mutations.csv" ' +
+                'target="_blank"><button type="button">&#8681; Download mutations (CSV)</button></a></p>';
+    }
     if ((r.mutations || []).length === 0) {
         html += '<p>No coding mutations found in the annotated set.</p>';
     } else {
         html += '<table><tr><th>Position</th><th>Change</th><th>Gene</th>' +
                 '<th>Consequence</th><th>Amino Acid (HGVSp)</th></tr>';
         r.mutations.slice(0, 200).forEach(m => {
+            var isDiab = (r.diabetes_findings || []).some(function(f){return f.gene_symbol === m.gene_symbol;});
+            var geneCell = (m.gene_symbol || '-') + (isDiab ? ' <span class="badge" style="background:#dc2626;">diabetes</span>' : '');
             html += '<tr><td>' + m.position + '</td><td>' + m.ref + '&rarr;' + m.alt + '</td>' +
-                    '<td>' + (m.gene_symbol || '-') + '</td>' +
+                    '<td>' + geneCell + '</td>' +
                     '<td>' + (m.consequence_terms || []).join(', ') + '</td>' +
                     '<td>' + (m.hgvsp || m.amino_acid_change || '-') + '</td></tr>';
         });
         html += '</table>';
         if (r.mutations.length > 200) html += '<p>Showing first 200 of ' + r.mutations.length + '.</p>';
+    }
+    html += '</div>';
+
+    // Diabetes interpretation
+    html += '<div class="card"><h2>Diabetes-Associated Findings</h2>';
+    html += '<p style="font-size:13px;color:#6b7280;">Interpretation from curated diabetes gene knowledge ' +
+            '(OMIM, PharmGKB, GWAS Catalog). For research/education only, not diagnostic. ' +
+            'Use the links to confirm each finding.</p>';
+    var df = r.diabetes_findings || [];
+    if (df.length === 0) {
+        html += '<p>No mutations in known diabetes-associated genes were found in the annotated set.</p>';
+    } else {
+        df.forEach(function(f){
+            html += '<div style="border:1px solid #e5e7eb;border-radius:8px;padding:12px;margin-bottom:12px;">';
+            html += '<h3 style="margin:0 0 4px 0;">' + f.gene_symbol +
+                    ' <span class="badge" style="background:#dc2626;">' + f.category + '</span></h3>';
+            html += '<p style="margin:4px 0;font-size:13px;"><b>Variant:</b> ' + f.position + ' ' + f.change +
+                    ' | ' + (f.consequence_terms||[]).join(', ') +
+                    (f.amino_acid_change ? ' | ' + f.amino_acid_change : '') + '</p>';
+            html += '<p style="margin:4px 0;font-size:13px;"><b>Gene role:</b> ' + f.role + '</p>';
+            html += '<p style="margin:4px 0;font-size:13px;"><b>Diabetes significance:</b> ' + f.significance + '</p>';
+            html += '<p style="margin:4px 0;font-size:13px;"><b>Treatment relevance:</b> ' + f.treatment + '</p>';
+            html += '<p style="margin:4px 0;font-size:12px;">Confirm on: ' +
+                    '<a href="' + f.pharmgkb_url + '" target="_blank">PharmGKB</a> | ' +
+                    '<a href="' + f.omim_url + '" target="_blank">OMIM</a> | ' +
+                    '<a href="' + f.gwas_url + '" target="_blank">GWAS Catalog</a></p>';
+            html += '</div>';
+        });
     }
     html += '</div>';
 
