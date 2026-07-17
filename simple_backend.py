@@ -596,6 +596,41 @@ INDEX_HTML = """
         .evidence-links { margin: 12px 0 0 !important; padding-top: 10px; border-top: 1px solid rgba(87,120,170,.1); font-size: .75rem !important; }
         .gene-title { display: flex; align-items: center; gap: 10px; margin: 24px 0 10px; }
         .gene-title::before { content: "GENE"; padding: 4px 7px; border-radius: 6px; color: #2764c9; background: #eaf1ff; font-size: .58rem; letter-spacing: .08em; }
+        .structure-gene-button { min-height: 0; padding: 2px 0; overflow: visible; border-radius: 5px; color: #245bc9; background: none; box-shadow: none; font-size: inherit; font-weight: 800; text-decoration: underline; text-decoration-color: rgba(36,91,201,.28); text-underline-offset: 3px; }
+        .structure-gene-button::after { display: none; }
+        .structure-gene-button:hover { color: #123f9c; background: none; box-shadow: none; filter: none; transform: none; text-decoration-color: currentColor; }
+        body.viewer-open { overflow: hidden; }
+        .structure-modal[hidden] { display: none; }
+        .structure-modal { position: fixed; inset: 0; z-index: 80; display: grid; place-items: center; padding: 22px; }
+        .structure-modal-backdrop { position: absolute; inset: 0; background: rgba(11,25,48,.58); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); animation: modalFade .2s ease both; }
+        .structure-dialog { position: relative; width: min(1040px, 100%); max-height: calc(100vh - 44px); display: flex; flex-direction: column; overflow: hidden; border: 1px solid rgba(255,255,255,.52); border-radius: 24px; background: rgba(249,252,255,.97); box-shadow: 0 35px 100px rgba(7,24,53,.3); animation: modalEnter .26s cubic-bezier(.2,.8,.2,1) both; }
+        @keyframes modalFade { from { opacity: 0; } }
+        @keyframes modalEnter { from { opacity: 0; transform: translateY(16px) scale(.98); } }
+        .structure-dialog-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; padding: 20px 22px 15px; border-bottom: 1px solid rgba(86,119,169,.15); }
+        .structure-dialog-header h2 { margin-bottom: 5px; }
+        .structure-subtitle { margin: 0; color: var(--muted); font-size: .78rem; }
+        .structure-close { width: 38px; min-height: 38px; flex: 0 0 auto; padding: 0; border: 1px solid rgba(83,116,166,.17); border-radius: 11px; color: #3c526e; background: rgba(238,244,252,.86); box-shadow: none; font-size: 1.25rem; }
+        .structure-close::after, .viewer-control::after { display: none; }
+        .structure-close:hover { color: #17345e; background: #e4edfa; box-shadow: none; transform: none; }
+        .structure-meta { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 22px; border-bottom: 1px solid rgba(86,119,169,.12); }
+        .structure-meta-item { padding: 6px 9px; border: 1px solid rgba(78,115,176,.14); border-radius: 8px; color: #465e7c; background: rgba(238,245,255,.75); font-size: .69rem; font-weight: 700; }
+        .viewer-shell { position: relative; min-height: 360px; height: min(59vh, 610px); overflow: hidden; background: radial-gradient(circle at 50% 45%, #ffffff, #edf3fb); }
+        #nglViewport { width: 100%; height: 100%; }
+        .viewer-loading { position: absolute; inset: 0; z-index: 3; display: grid; place-items: center; padding: 24px; color: #536984; background: rgba(244,248,253,.88); font-size: .82rem; text-align: center; backdrop-filter: blur(6px); }
+        .viewer-loading[hidden] { display: none; }
+        .viewer-loading::before { content: ""; width: 30px; height: 30px; margin-bottom: 48px; position: absolute; border: 3px solid #d5e2f5; border-top-color: var(--blue); border-radius: 50%; animation: viewerSpin .8s linear infinite; }
+        .viewer-loading.is-error { color: #9f2838; background: rgba(255,245,246,.94); }
+        .viewer-loading.is-error::before { display: none; }
+        @keyframes viewerSpin { to { transform: rotate(360deg); } }
+        .variant-label { position: absolute; z-index: 2; top: 14px; left: 14px; max-width: calc(100% - 28px); padding: 8px 11px; border: 1px solid rgba(239,68,68,.2); border-radius: 9px; color: #a41f2d; background: rgba(255,247,247,.9); box-shadow: 0 8px 24px rgba(97,31,42,.1); font-size: .72rem; font-weight: 800; pointer-events: none; backdrop-filter: blur(8px); }
+        .plddt-legend { position: absolute; z-index: 2; right: 14px; bottom: 14px; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px 10px; max-width: calc(100% - 28px); padding: 8px 10px; border: 1px solid rgba(78,109,157,.14); border-radius: 9px; color: #536984; background: rgba(255,255,255,.86); box-shadow: 0 8px 24px rgba(35,62,103,.08); font-size: .62rem; backdrop-filter: blur(8px); pointer-events: none; }
+        .plddt-legend span { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+        .plddt-dot { width: 7px; height: 7px; border-radius: 50%; }
+        .structure-dialog-footer { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; padding: 13px 22px; border-top: 1px solid rgba(86,119,169,.14); }
+        .viewer-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+        .viewer-control { min-height: 35px; padding: 7px 11px; border: 1px solid rgba(69,108,171,.18); border-radius: 9px; color: #315681; background: rgba(235,243,254,.9); box-shadow: none; font-size: .7rem; }
+        .viewer-control:hover { color: #173d72; background: #e1ecfc; box-shadow: none; transform: none; }
+        .alphafold-secondary-link { font-size: .73rem; }
         .mutation-chart-host { min-height: 320px; }
         .mutation-chart-layout { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(280px, 1.25fr); gap: 34px; align-items: center; }
         .mutation-legend { display: flex; flex-direction: column; gap: 7px; }
@@ -714,6 +749,27 @@ INDEX_HTML = """
     <div id="resultsArea" aria-live="polite"></div>
 </main>
 <footer class="footer"><strong>HelixAI Pharmacogenomics Intelligence</strong> &middot; Research and educational use only &middot; Confirm findings with primary evidence sources</footer>
+
+<div id="structureModal" class="structure-modal" role="dialog" aria-modal="true" aria-labelledby="structureViewerTitle" hidden>
+    <div class="structure-modal-backdrop" data-close-structure-viewer></div>
+    <section class="structure-dialog" tabindex="-1">
+        <header class="structure-dialog-header">
+            <div><p class="section-kicker">Interactive molecular model</p><h2 id="structureViewerTitle">Protein structure</h2><p id="structureViewerSubtitle" class="structure-subtitle"></p></div>
+            <button type="button" id="structureViewerClose" class="structure-close" aria-label="Close structure viewer">&times;</button>
+        </header>
+        <div id="structureViewerMeta" class="structure-meta"></div>
+        <div class="viewer-shell" id="viewerShell" aria-busy="true">
+            <div id="nglViewport" aria-label="Interactive three-dimensional protein structure"></div>
+            <div id="structureViewerLoading" class="viewer-loading">Loading the AlphaFold structure...</div>
+            <div id="structureVariantLabel" class="variant-label"></div>
+            <div class="plddt-legend" aria-label="AlphaFold confidence colors"><span><i class="plddt-dot" style="background:#0053D6"></i>Very high</span><span><i class="plddt-dot" style="background:#65CBF3"></i>Confident</span><span><i class="plddt-dot" style="background:#FFDB13"></i>Low</span><span><i class="plddt-dot" style="background:#FF7D45"></i>Very low</span></div>
+        </div>
+        <footer class="structure-dialog-footer">
+            <div class="viewer-actions"><button type="button" id="focusResidueBtn" class="viewer-control">Focus mutated residue</button><button type="button" id="fullStructureBtn" class="viewer-control">View full protein</button></div>
+            <a id="alphafoldDbLink" class="alphafold-secondary-link" href="#" target="_blank" rel="noopener noreferrer">Open in AlphaFold DB &#8599;</a>
+        </footer>
+    </section>
+</div>
 
 <script>
 if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
@@ -900,17 +956,19 @@ function renderResults(r) {
     } else {
         html += '<table><tr><th>Gene</th><th>UniProt</th><th>Residue</th><th>Change</th>' +
                 '<th>pLDDT</th><th>In Domain</th><th>Impact</th><th>View</th></tr>';
-        r.structures.forEach(st => {
+        r.structures.forEach(function(st, structureIndex) {
             if (st.error) {
                 html += '<tr><td>' + st.gene_symbol + '</td><td>' + (st.uniprot_id||'-') +
                         '</td><td colspan="6">error: ' + st.error + '</td></tr>';
             } else {
-                html += '<tr><td>' + st.gene_symbol + '</td><td>' + st.uniprot_id + '</td>' +
+                html += '<tr><td><button type="button" class="structure-gene-button" data-structure-index="' + structureIndex + '" ' +
+                        'aria-label="View ' + st.gene_symbol + ' structure at residue ' + st.residue_position + '">' + st.gene_symbol + '</button></td>' +
+                        '<td>' + st.uniprot_id + '</td>' +
                         '<td>' + st.residue_position + '</td><td>' + (st.amino_acid_change||'-') + '</td>' +
                         '<td>' + (st.plddt_score!=null ? st.plddt_score.toFixed(1) : '-') + '</td>' +
                         '<td>' + (st.in_domain ? 'Yes' : 'No') + '</td>' +
                         '<td>' + (st.structural_impact||'-') + '</td>' +
-                        '<td><a href="' + st.alphafold_url + '" target="_blank">AlphaFold</a></td></tr>';
+                        '<td><button type="button" class="viewer-control" data-structure-index="' + structureIndex + '">3D view</button></td></tr>';
             }
         });
         html += '</table>';
@@ -960,6 +1018,11 @@ function renderResults(r) {
     document.getElementById('resultsArea').querySelectorAll('table').forEach(function(table) {
         table.setAttribute('tabindex', '0');
         table.setAttribute('aria-label', 'Scrollable scientific results table');
+    });
+    document.getElementById('resultsArea').querySelectorAll('[data-structure-index]').forEach(function(control) {
+        control.addEventListener('click', function() {
+            openStructureViewer((r.structures || [])[Number(control.dataset.structureIndex)], control);
+        });
     });
     renderMutationDonut(r.mutation_type_counts || {});
 }
@@ -1127,6 +1190,140 @@ function metric(val, label) {
     return '<div class="metric"><div class="val">' + (val!=null?val:0) +
            '</div><div class="lbl">' + label + '</div></div>';
 }
+
+let nglScriptPromise = null;
+let structureStage = null;
+let structureComponent = null;
+let activeResidueSelection = null;
+let structureViewerTrigger = null;
+
+function loadNglViewer() {
+    if (window.NGL) return Promise.resolve(window.NGL);
+    if (nglScriptPromise) return nglScriptPromise;
+    nglScriptPromise = new Promise(function(resolve, reject) {
+        const script = document.createElement('script');
+        script.src = 'https://cdnjs.cloudflare.com/ajax/libs/ngl/2.0.0-dev.39/ngl.min.js';
+        script.async = true;
+        script.onload = function() { window.NGL ? resolve(window.NGL) : reject(new Error('NGL did not initialize')); };
+        script.onerror = function() { reject(new Error('The 3D viewer library could not be loaded')); };
+        document.head.appendChild(script);
+    });
+    return nglScriptPromise;
+}
+
+function alphaFoldConfidenceScheme() {
+    return window.NGL.ColormakerRegistry.addScheme(function() {
+        this.atomColor = function(atom) {
+            if (atom.bfactor >= 90) return 0x0053D6;
+            if (atom.bfactor >= 70) return 0x65CBF3;
+            if (atom.bfactor >= 50) return 0xFFDB13;
+            return 0xFF7D45;
+        };
+    });
+}
+
+async function resolveAlphaFoldModel(uniprotId) {
+    const fallback = 'https://alphafold.ebi.ac.uk/files/AF-' + encodeURIComponent(uniprotId) + '-F1-model_v4.pdb';
+    try {
+        const response = await fetch('https://alphafold.ebi.ac.uk/api/prediction/' + encodeURIComponent(uniprotId));
+        if (!response.ok) return fallback;
+        const records = await response.json();
+        return records && records[0] && records[0].pdbUrl ? records[0].pdbUrl : fallback;
+    } catch (error) {
+        return fallback;
+    }
+}
+
+async function openStructureViewer(structure, trigger) {
+    if (!structure || structure.error || !structure.uniprot_id || !structure.residue_position) return;
+    structureViewerTrigger = trigger || document.activeElement;
+    const modal = document.getElementById('structureModal');
+    const loading = document.getElementById('structureViewerLoading');
+    const shell = document.getElementById('viewerShell');
+    const residue = Number(structure.residue_position);
+    activeResidueSelection = String(residue);
+    document.getElementById('structureViewerTitle').textContent = (structure.gene_symbol || 'Protein') + ' structure';
+    document.getElementById('structureViewerSubtitle').textContent = 'UniProt ' + structure.uniprot_id + ' \u2022 mutated residue ' + residue;
+    document.getElementById('structureVariantLabel').textContent = (structure.amino_acid_change || 'Variant') + ' \u2022 residue ' + residue;
+    document.getElementById('structureViewerMeta').innerHTML =
+        '<span class="structure-meta-item">Gene: ' + (structure.gene_symbol || '-') + '</span>' +
+        '<span class="structure-meta-item">UniProt: ' + structure.uniprot_id + '</span>' +
+        '<span class="structure-meta-item">Residue: ' + residue + '</span>' +
+        '<span class="structure-meta-item">Change: ' + (structure.amino_acid_change || '-') + '</span>' +
+        '<span class="structure-meta-item">pLDDT: ' + (structure.plddt_score != null ? Number(structure.plddt_score).toFixed(1) : '-') + '</span>';
+    const externalUrl = structure.alphafold_url || ('https://alphafold.ebi.ac.uk/entry/' + encodeURIComponent(structure.uniprot_id));
+    document.getElementById('alphafoldDbLink').href = externalUrl;
+    loading.hidden = false;
+    loading.classList.remove('is-error');
+    loading.textContent = 'Loading the AlphaFold structure...';
+    shell.setAttribute('aria-busy', 'true');
+    modal.hidden = false;
+    document.body.classList.add('viewer-open');
+    document.getElementById('structureViewerClose').focus();
+
+    try {
+        await loadNglViewer();
+        await new Promise(function(resolve) { requestAnimationFrame(resolve); });
+        if (structureStage) structureStage.dispose();
+        structureStage = new window.NGL.Stage('nglViewport', { backgroundColor: '#f7faff', quality: 'medium', tooltip: true });
+        const modelUrl = await resolveAlphaFoldModel(structure.uniprot_id);
+        structureComponent = await structureStage.loadFile(modelUrl, { ext: 'pdb' });
+        const confidenceScheme = alphaFoldConfidenceScheme();
+        structureComponent.addRepresentation('cartoon', { color: confidenceScheme, smoothSheet: true, quality: 'medium' });
+        const mutationSelection = new window.NGL.Selection(activeResidueSelection);
+        let residueCount = 0;
+        structureComponent.structure.eachAtom(function() { residueCount += 1; }, mutationSelection);
+        if (residueCount > 0) {
+            structureComponent.addRepresentation('ball+stick', { sele: activeResidueSelection, color: '#e53935', scale: 2.1, aspectRatio: 1.4 });
+            structureComponent.addRepresentation('spacefill', { sele: activeResidueSelection, color: '#ff5252', radiusScale: .45, opacity: .85 });
+            structureComponent.addRepresentation('label', { sele: activeResidueSelection + ' and .CA', labelType: 'res', color: '#a61120', backgroundColor: '#ffffff', backgroundOpacity: .86, showBackground: true, labelGrouping: 'residue', fixedSize: true, zOffset: 2 });
+            structureComponent.autoView(activeResidueSelection, 650);
+        } else {
+            structureComponent.autoView(undefined, 650);
+            document.getElementById('structureVariantLabel').textContent += ' (residue not found in model numbering)';
+        }
+        loading.hidden = true;
+        shell.setAttribute('aria-busy', 'false');
+        structureStage.handleResize();
+    } catch (error) {
+        loading.hidden = false;
+        loading.classList.add('is-error');
+        loading.textContent = 'Unable to load the interactive model. Use the AlphaFold DB link below or check network/WebGL access.';
+        shell.setAttribute('aria-busy', 'false');
+        console.error('Structure viewer error:', error);
+    }
+}
+
+function closeStructureViewer() {
+    const modal = document.getElementById('structureModal');
+    if (modal.hidden) return;
+    modal.hidden = true;
+    document.body.classList.remove('viewer-open');
+    if (structureStage) { structureStage.dispose(); structureStage = null; structureComponent = null; }
+    document.getElementById('nglViewport').replaceChildren();
+    if (structureViewerTrigger && document.contains(structureViewerTrigger)) structureViewerTrigger.focus();
+}
+
+document.getElementById('structureViewerClose').addEventListener('click', closeStructureViewer);
+document.querySelector('[data-close-structure-viewer]').addEventListener('click', closeStructureViewer);
+document.getElementById('focusResidueBtn').addEventListener('click', function() {
+    if (structureComponent && activeResidueSelection) structureComponent.autoView(activeResidueSelection, 600);
+});
+document.getElementById('fullStructureBtn').addEventListener('click', function() {
+    if (structureComponent) structureComponent.autoView(undefined, 600);
+});
+window.addEventListener('resize', function() { if (structureStage) structureStage.handleResize(); });
+document.addEventListener('keydown', function(event) {
+    if (event.key === 'Escape' && !document.getElementById('structureModal').hidden) closeStructureViewer();
+    if (event.key === 'Tab' && !document.getElementById('structureModal').hidden) {
+        const modal = document.getElementById('structureModal');
+        const focusable = Array.from(modal.querySelectorAll('button, a[href], [tabindex]:not([tabindex="-1"])')).filter(function(el) { return !el.disabled; });
+        if (!focusable.length) return;
+        const first = focusable[0], last = focusable[focusable.length - 1];
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    }
+});
 </script>
 </body>
 </html>
