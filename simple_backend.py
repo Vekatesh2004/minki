@@ -51,6 +51,8 @@ except Exception as e:  # catch ImportError AND any error raised at import time
 # The Ensembl VEP web API cannot annotate a whole chromosome (hundreds of
 # thousands of variants). We cap how many PASS variants we send.
 # ----------------------------------------------------------------------------
+BASE_DIR = Path(__file__).resolve().parent
+EXAMPLE_VCF_PATH = BASE_DIR / "examples" / "sample_pharmacogenomics.vcf"
 MAX_VARIANTS_TO_VEP = int(os.getenv("MAX_VARIANTS_TO_VEP", "300"))
 MAX_GENES_FOR_STRUCTURE = int(os.getenv("MAX_GENES_FOR_STRUCTURE", "15"))
 VEP_BATCH_TIMEOUT = 90        # seconds per VEP batch
@@ -165,6 +167,27 @@ async def upload_file(
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
+
+@app.post("/api/example", response_model=SimpleUploadResponse)
+async def analyze_example(background_tasks: BackgroundTasks):
+    """Queue analysis of the bundled example VCF without requiring an upload."""
+    if not EXAMPLE_VCF_PATH.is_file():
+        raise HTTPException(status_code=503, detail="Bundled example VCF is unavailable")
+
+    upload_id = str(uuid.uuid4())
+    background_tasks.add_task(
+        analyze_file,
+        upload_id,
+        str(EXAMPLE_VCF_PATH),
+        "SAMPLE_PHARMACOGENOMICS_EXAMPLE",
+    )
+    return SimpleUploadResponse(
+        upload_id=upload_id,
+        filename=EXAMPLE_VCF_PATH.name,
+        status="queued",
+        message="Example analysis queued",
+    )
 
 
 def _set(upload_id: str, *, status=None, progress=None, message=None, results=None):
@@ -432,63 +455,290 @@ if Path("results").exists():
 
 INDEX_HTML = """
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>Pharmacogenomics Pipeline</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#f4f8ff">
+    <meta name="description" content="AI-assisted pharmacogenomics, molecular structure, and precision medicine analysis.">
+    <title>HelixAI | Pharmacogenomics Intelligence</title>
     <style>
-        body { font-family: -apple-system, Arial, sans-serif; margin: 0; background: #f5f7fa; color: #1f2937; }
-        .container { max-width: 1000px; margin: 0 auto; padding: 30px; }
-        .card { background: white; padding: 24px; border-radius: 10px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); margin-bottom: 20px; }
-        h1 { color: #1e3a8a; }
-        h2 { color: #1e3a8a; border-left: 4px solid #3b82f6; padding-left: 10px; font-size: 1.1rem; }
-        button { background: #3b82f6; color: white; padding: 10px 18px; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; }
-        button:hover { background: #2563eb; }
-        button:disabled { background: #9ca3af; cursor: not-allowed; }
-        input[type=text], input[type=file] { padding: 8px; margin: 6px 0; width: 100%; box-sizing: border-box; border: 1px solid #d1d5db; border-radius: 6px; }
-        table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13px; }
-        th, td { border: 1px solid #e5e7eb; padding: 6px 8px; text-align: left; }
-        th { background: #1e3a8a; color: white; }
-        tr:nth-child(even) { background: #f9fafb; }
-        .metrics { display: flex; gap: 12px; flex-wrap: wrap; }
-        .metric { background: #eff6ff; border-radius: 8px; padding: 14px 18px; text-align: center; flex: 1; min-width: 120px; }
-        .metric .val { font-size: 1.6rem; font-weight: bold; color: #2563eb; }
-        .metric .lbl { font-size: 0.8rem; color: #6b7280; }
-        .bar { height: 22px; background: #e5e7eb; border-radius: 6px; overflow: hidden; }
-        .bar-fill { height: 100%; background: #3b82f6; color: white; text-align: center; font-size: 12px; line-height: 22px; transition: width .3s; }
-        .note { background: #fef3c7; padding: 10px; border-radius: 6px; font-size: 13px; margin-top: 10px; }
-        .badge { padding: 2px 8px; border-radius: 10px; font-size: 11px; color: white; }
-        a { color: #2563eb; }
+        :root {
+            --ink: #10213b; --muted: #61718a; --blue: #2764eb; --blue-2: #4f8cff;
+            --teal: #0d9488; --violet: #7357d9; --line: rgba(93, 125, 176, .19);
+            --glass: rgba(255, 255, 255, .74); --glass-strong: rgba(255, 255, 255, .9);
+            --shadow: 0 22px 60px rgba(37, 73, 132, .11); --radius: 22px;
+            --parallax-x: 0px; --parallax-y: 0px;
+        }
+        * { box-sizing: border-box; }
+        html { scroll-behavior: smooth; }
+        body {
+            margin: 0; min-width: 320px; color: var(--ink); overflow-x: hidden;
+            font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background:
+                radial-gradient(circle at 8% 8%, rgba(90, 140, 255, .14), transparent 30rem),
+                radial-gradient(circle at 90% 22%, rgba(22, 186, 173, .1), transparent 26rem),
+                linear-gradient(145deg, #f9fbff 0%, #f1f6fd 48%, #f8fbff 100%);
+            line-height: 1.55;
+        }
+        body::before { content: ""; position: fixed; inset: 0; z-index: -3; opacity: .32; background-image: linear-gradient(rgba(59, 100, 168, .05) 1px, transparent 1px), linear-gradient(90deg, rgba(59, 100, 168, .05) 1px, transparent 1px); background-size: 44px 44px; mask-image: linear-gradient(to bottom, black, transparent 78%); }
+        button, input { font: inherit; }
+        a { color: var(--blue); text-decoration: none; font-weight: 650; transition: color .2s ease, opacity .2s ease; }
+        a:hover { color: #1749b8; }
+        :focus-visible { outline: 3px solid rgba(39, 100, 235, .35); outline-offset: 3px; }
+        .skip-link { position: fixed; z-index: 100; left: 16px; top: -60px; padding: 10px 15px; border-radius: 10px; background: #fff; box-shadow: var(--shadow); }
+        .skip-link:focus { top: 12px; }
+        .science-bg { position: fixed; inset: 0; z-index: -2; pointer-events: none; overflow: hidden; color: #316ed9; }
+        .science-bg svg { width: 100%; height: 100%; opacity: .095; transform: translate3d(var(--parallax-x), var(--parallax-y), 0); transition: transform .25s ease-out; }
+        .float-a { transform-origin: 18% 25%; animation: floatA 18s ease-in-out infinite; }
+        .float-b { transform-origin: 82% 22%; animation: floatB 24s ease-in-out infinite; }
+        .float-c { transform-origin: 78% 78%; animation: floatA 21s ease-in-out -7s infinite reverse; }
+        .particle { animation: particle 8s ease-in-out infinite; }
+        .particle:nth-child(2n) { animation-delay: -3s; }
+        @keyframes floatA { 0%,100% { transform: translate3d(0,0,0) rotate(0); } 50% { transform: translate3d(18px,-18px,0) rotate(5deg); } }
+        @keyframes floatB { 0%,100% { transform: translate3d(0,0,0) rotate(0) scale(1); } 50% { transform: translate3d(-16px,22px,0) rotate(-7deg) scale(1.04); } }
+        @keyframes particle { 0%,100% { opacity: .25; transform: translateY(0); } 50% { opacity: .85; transform: translateY(-16px); } }
+        .topbar { position: relative; z-index: 10; border-bottom: 1px solid rgba(113, 143, 190, .16); background: rgba(250, 252, 255, .7); backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px); }
+        .topbar-inner { width: min(1180px, calc(100% - 40px)); min-height: 72px; margin: auto; display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+        .brand { display: inline-flex; align-items: center; gap: 11px; color: var(--ink); }
+        .brand-mark { width: 38px; height: 38px; display: grid; place-items: center; border: 1px solid rgba(75, 126, 216, .22); border-radius: 12px; color: white; background: linear-gradient(145deg, var(--blue), #22a6a0); box-shadow: 0 9px 24px rgba(39, 100, 235, .24); }
+        .brand-mark svg { width: 22px; height: 22px; }
+        .brand-copy { display: grid; line-height: 1.12; }
+        .brand-copy strong { font-size: .98rem; letter-spacing: -.01em; }
+        .brand-copy span { margin-top: 3px; color: var(--muted); font-size: .7rem; font-weight: 650; letter-spacing: .07em; text-transform: uppercase; }
+        .platform-status { display: inline-flex; align-items: center; gap: 8px; padding: 8px 12px; color: #31605e; border: 1px solid rgba(13, 148, 136, .18); border-radius: 999px; background: rgba(236, 253, 250, .72); font-size: .76rem; font-weight: 700; }
+        .status-dot { width: 7px; height: 7px; border-radius: 50%; background: #13a89e; box-shadow: 0 0 0 5px rgba(19, 168, 158, .1); animation: statusPulse 2.4s ease-out infinite; }
+        @keyframes statusPulse { 70%,100% { box-shadow: 0 0 0 8px rgba(19,168,158,0); } }
+        .container { position: relative; width: min(1180px, calc(100% - 40px)); margin: 0 auto; padding: 70px 0 80px; }
+        .hero { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(300px, .65fr); gap: 54px; align-items: center; margin-bottom: 42px; animation: enter .75s both; }
+        .eyebrow { display: inline-flex; align-items: center; gap: 9px; margin-bottom: 18px; color: #2761ca; font-size: .75rem; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
+        .eyebrow::before { content: ""; width: 28px; height: 1px; background: linear-gradient(90deg, var(--blue), var(--teal)); }
+        h1 { max-width: 780px; margin: 0; color: #10284d; font-size: clamp(2.35rem, 5vw, 4.55rem); line-height: .99; letter-spacing: -.055em; }
+        .gradient-text { color: transparent; background: linear-gradient(105deg, #245ed5 10%, #198f9c 53%, #7357d9 94%); background-clip: text; -webkit-background-clip: text; }
+        .hero-copy > p { max-width: 720px; margin: 24px 0 26px; color: var(--muted); font-size: clamp(1rem, 1.8vw, 1.17rem); }
+        .capabilities { display: flex; flex-wrap: wrap; gap: 9px; }
+        .capability { display: inline-flex; align-items: center; gap: 7px; padding: 8px 11px; border: 1px solid rgba(83, 119, 177, .16); border-radius: 999px; color: #425875; background: rgba(255,255,255,.56); font-size: .76rem; font-weight: 700; backdrop-filter: blur(8px); }
+        .capability svg { width: 14px; height: 14px; color: var(--blue); }
+        .hero-visual { position: relative; min-height: 300px; display: grid; place-items: center; }
+        .molecule-orbit { position: absolute; width: 290px; aspect-ratio: 1; border: 1px solid rgba(57, 111, 202, .13); border-radius: 50%; animation: orbit 26s linear infinite; }
+        .molecule-orbit::before, .molecule-orbit::after { content: ""; position: absolute; width: 10px; height: 10px; border-radius: 50%; background: var(--blue); box-shadow: 0 0 20px rgba(39,100,235,.55); }
+        .molecule-orbit::before { left: 18px; top: 62px; } .molecule-orbit::after { right: 24px; bottom: 48px; background: var(--teal); }
+        @keyframes orbit { to { transform: rotate(360deg); } }
+        .helix-panel { width: 230px; height: 250px; padding: 22px; border: 1px solid rgba(91, 127, 184, .18); border-radius: 34px; background: linear-gradient(150deg, rgba(255,255,255,.78), rgba(239,247,255,.5)); box-shadow: var(--shadow); backdrop-filter: blur(18px); transform: rotate(4deg); }
+        .helix-panel svg { width: 100%; height: 100%; filter: drop-shadow(0 12px 15px rgba(45,94,172,.13)); }
+        .card { position: relative; margin-bottom: 24px; padding: 30px; border: 1px solid var(--line); border-radius: var(--radius); background: linear-gradient(145deg, var(--glass-strong), var(--glass)); box-shadow: var(--shadow); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); transition: transform .25s ease, box-shadow .25s ease, border-color .25s ease; }
+        .card::after { content: ""; position: absolute; inset: 0; z-index: -1; border-radius: inherit; opacity: 0; background: radial-gradient(circle at 15% 0%, rgba(61,128,246,.08), transparent 38%); transition: opacity .25s ease; }
+        .card:hover { border-color: rgba(72, 123, 209, .28); box-shadow: 0 27px 70px rgba(37, 73, 132, .14); transform: translateY(-2px); }
+        .card:hover::after { opacity: 1; }
+        .upload-card { display: grid; grid-template-columns: minmax(0, 1fr) minmax(240px, .38fr); gap: 34px; overflow: hidden; }
+        .upload-card::before { content: ""; position: absolute; width: 250px; height: 250px; right: -90px; top: -110px; border-radius: 50%; background: radial-gradient(circle, rgba(72,132,238,.13), transparent 68%); }
+        .upload-main, .upload-aside { position: relative; z-index: 1; }
+        .upload-aside { padding: 24px; border: 1px solid rgba(91,127,184,.14); border-radius: 17px; background: rgba(244,248,255,.62); }
+        .section-kicker { margin: 0 0 6px; color: var(--teal); font-size: .71rem; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; }
+        h2 { display: flex; align-items: center; gap: 11px; margin: 0 0 22px; color: #15305a; font-size: 1.12rem; line-height: 1.3; letter-spacing: -.015em; }
+        h2::before { content: ""; width: 9px; height: 9px; flex: 0 0 auto; border: 4px solid rgba(39,100,235,.18); border-radius: 50%; background: var(--blue); box-shadow: 0 0 0 5px rgba(39,100,235,.055); }
+        h3 { color: #18355e; }
+        .section-intro { margin: -12px 0 24px; color: var(--muted); font-size: .92rem; }
+        .field { margin-bottom: 17px; }
+        .field label { display: block; margin-bottom: 7px; color: #304765; font-size: .78rem; font-weight: 750; }
+        input[type=text], input[type=file] { width: 100%; min-height: 50px; padding: 12px 14px; color: var(--ink); border: 1px solid rgba(92,123,173,.24); border-radius: 13px; background: rgba(255,255,255,.78); box-shadow: inset 0 1px 2px rgba(20,45,80,.025); transition: border-color .2s, box-shadow .2s, background .2s; }
+        input[type=file] { padding: 8px; cursor: pointer; color: var(--muted); }
+        input[type=file]::file-selector-button { height: 33px; margin-right: 12px; padding: 0 13px; border: 0; border-radius: 9px; color: #2454b6; background: #eaf1ff; font-weight: 750; cursor: pointer; }
+        input:focus { outline: 0; border-color: rgba(39,100,235,.7); background: white; box-shadow: 0 0 0 4px rgba(39,100,235,.1), 0 8px 24px rgba(39,100,235,.07); }
+        .action-row { display: flex; flex-wrap: wrap; gap: 11px; margin-top: 20px; }
+        button { position: relative; min-height: 45px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 10px 18px; overflow: hidden; border: 0; border-radius: 12px; color: white; background: linear-gradient(120deg, #2865e8, #4c87f1); box-shadow: 0 10px 24px rgba(39,100,235,.2); font-size: .84rem; font-weight: 760; cursor: pointer; transition: transform .18s ease, box-shadow .18s ease, filter .18s ease; }
+        button::after { content: ""; position: absolute; inset: -80% -30%; background: linear-gradient(110deg, transparent 42%, rgba(255,255,255,.26), transparent 58%); transform: translateX(-80%); transition: transform .55s ease; }
+        button:hover { filter: saturate(1.08); box-shadow: 0 14px 30px rgba(39,100,235,.28); transform: translateY(-2px); }
+        button:hover::after { transform: translateX(80%); }
+        button:active { transform: translateY(0) scale(.98); }
+        button.secondary { color: #08786f; border: 1px solid rgba(13,148,136,.2); background: rgba(236,253,250,.86); box-shadow: 0 8px 20px rgba(13,148,136,.1); }
+        button.secondary:hover { box-shadow: 0 12px 25px rgba(13,148,136,.16); }
+        button:disabled, button.secondary:disabled { color: white; background: #aeb9c9; box-shadow: none; cursor: not-allowed; transform: none; }
+        button svg { width: 17px; height: 17px; }
+        .example-help { margin: 10px 0 0; color: var(--muted); font-size: .76rem; }
+        code { padding: 2px 6px; border: 1px solid rgba(84,118,172,.12); border-radius: 7px; color: #385477; background: rgba(232,240,252,.75); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .86em; }
+        .aside-list { display: grid; gap: 14px; margin: 18px 0 0; padding: 0; list-style: none; }
+        .aside-list li { display: flex; gap: 10px; color: #52677f; font-size: .79rem; }
+        .aside-list svg { width: 17px; height: 17px; flex: 0 0 auto; color: var(--teal); }
+        .note { margin-top: 19px; padding: 13px 15px; border: 1px solid rgba(217,154,38,.17); border-radius: 12px; color: #745826; background: rgba(255,249,231,.68); font-size: .79rem; }
+        #progressCard { overflow: hidden; }
+        .progress-head { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
+        .analysis-pulse { width: 38px; height: 38px; border: 1px solid rgba(39,100,235,.16); border-radius: 50%; background: radial-gradient(circle, rgba(39,100,235,.18) 0 22%, transparent 24%); animation: analyzePulse 1.8s ease-in-out infinite; }
+        @keyframes analyzePulse { 50% { box-shadow: 0 0 0 12px rgba(39,100,235,0); transform: scale(1.06); } }
+        .bar { height: 11px; margin-top: 18px; overflow: hidden; border: 1px solid rgba(71,105,159,.1); border-radius: 999px; background: rgba(218,228,242,.68); }
+        .bar-fill { height: 100%; min-width: 0; border-radius: inherit; color: transparent; background: linear-gradient(90deg, var(--blue), #18a8a0, var(--violet)); background-size: 200% 100%; box-shadow: 0 0 18px rgba(39,100,235,.24); transition: width .45s cubic-bezier(.22,.8,.25,1); animation: progressFlow 2s linear infinite; }
+        @keyframes progressFlow { to { background-position: -200% 0; } }
+        #statusMsg { margin: 13px 0 0; color: var(--muted); font-size: .84rem; }
+        #resultsArea { display: grid; gap: 0; }
+        #resultsArea > .card { animation: enter .55s both; }
+        #resultsArea > .card:nth-child(2) { animation-delay: .06s; } #resultsArea > .card:nth-child(3) { animation-delay: .12s; } #resultsArea > .card:nth-child(4) { animation-delay: .18s; } #resultsArea > .card:nth-child(5) { animation-delay: .24s; } #resultsArea > .card:nth-child(6) { animation-delay: .3s; }
+        @keyframes enter { from { opacity: 0; transform: translateY(18px) scale(.99); } to { opacity: 1; transform: none; } }
+        .metrics { display: grid; grid-template-columns: repeat(6, minmax(115px, 1fr)); gap: 11px; }
+        .metric { position: relative; min-height: 112px; display: flex; flex-direction: column; justify-content: center; padding: 17px 14px; overflow: hidden; border: 1px solid rgba(83,119,177,.13); border-radius: 15px; background: linear-gradient(150deg, rgba(244,249,255,.92), rgba(255,255,255,.7)); text-align: left; transition: transform .2s ease, border-color .2s ease; }
+        .metric::after { content: ""; position: absolute; width: 54px; height: 54px; right: -18px; top: -20px; border-radius: 50%; background: linear-gradient(145deg, rgba(39,100,235,.12), rgba(13,148,136,.08)); }
+        .metric:hover { transform: translateY(-3px); border-color: rgba(39,100,235,.27); }
+        .metric .val { color: #245bc9; font-size: 1.75rem; font-weight: 800; line-height: 1; letter-spacing: -.04em; }
+        .metric .lbl { margin-top: 9px; color: var(--muted); font-size: .69rem; font-weight: 750; letter-spacing: .045em; text-transform: uppercase; }
+        table { width: 100%; min-width: 680px; display: block; overflow-x: auto; border-spacing: 0; border-collapse: separate; border: 1px solid rgba(84,117,169,.14); border-radius: 14px; color: #314965; font-size: .79rem; }
+        tbody { width: 100%; }
+        th, td { min-width: 110px; padding: 13px 14px; border: 0; border-bottom: 1px solid rgba(84,117,169,.1); text-align: left; vertical-align: top; }
+        th { position: sticky; top: 0; z-index: 1; color: #365271; background: rgba(235,242,252,.96); font-size: .68rem; font-weight: 800; letter-spacing: .055em; text-transform: uppercase; backdrop-filter: blur(10px); }
+        tr:last-child td { border-bottom: 0; }
+        tbody tr { background: rgba(255,255,255,.42); transition: background .18s ease; }
+        tbody tr:nth-child(even) { background: rgba(243,247,253,.62); }
+        tbody tr:hover { background: rgba(228,239,255,.72); }
+        .badge { display: inline-flex; align-items: center; padding: 4px 8px; border-radius: 999px; color: white; box-shadow: 0 4px 12px rgba(40,65,100,.11); font-size: .64rem; font-weight: 800; line-height: 1; letter-spacing: .02em; }
+        .section-description { margin: -11px 0 22px; color: var(--muted) !important; font-size: .82rem !important; }
+        .finding-card { margin-bottom: 12px; padding: 17px 18px; border: 1px solid rgba(88,120,171,.14); border-radius: 14px; background: rgba(249,251,255,.7); transition: transform .2s, border-color .2s, box-shadow .2s; }
+        .finding-card:hover { transform: translateX(3px); border-color: rgba(39,100,235,.24); box-shadow: 0 10px 24px rgba(46,78,128,.07); }
+        .finding-card h3 { margin: 0 0 10px !important; display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+        .finding-meta { margin: 6px 0 !important; color: #465d78; font-size: .8rem !important; }
+        .evidence-links { margin: 12px 0 0 !important; padding-top: 10px; border-top: 1px solid rgba(87,120,170,.1); font-size: .75rem !important; }
+        .gene-title { display: flex; align-items: center; gap: 10px; margin: 24px 0 10px; }
+        .gene-title::before { content: "GENE"; padding: 4px 7px; border-radius: 6px; color: #2764c9; background: #eaf1ff; font-size: .58rem; letter-spacing: .08em; }
+        .mutation-chart-host { min-height: 320px; }
+        .mutation-chart-layout { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(280px, 1.25fr); gap: 34px; align-items: center; }
+        .mutation-legend { display: flex; flex-direction: column; gap: 7px; }
+        .mutation-legend-item { width: 100%; min-height: 44px; display: grid; grid-template-columns: 14px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 9px 11px; border: 1px solid transparent; border-radius: 11px; color: var(--ink); background: transparent; box-shadow: none; text-align: left; }
+        .mutation-legend-item::after { display: none; }
+        .mutation-legend-item:hover, .mutation-legend-item.is-active { color: var(--ink); border-color: #c8d9f5; background: #eff5ff; box-shadow: none; transform: translateX(3px); }
+        .mutation-swatch { width: 11px; height: 11px; border-radius: 3px; box-shadow: 0 3px 8px rgba(40,65,100,.16); }
+        .mutation-name { overflow-wrap: anywhere; font-size: .77rem; font-weight: 650; }
+        .mutation-value { color: var(--muted); font-size: .72rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
+        .donut-figure { position: relative; display: grid; place-items: center; min-width: 0; }
+        .donut-chart { width: min(100%, 340px); height: auto; overflow: visible; filter: drop-shadow(0 16px 22px rgba(41,78,137,.1)); }
+        .donut-segment { cursor: pointer; stroke-width: 34; transition: stroke-width .15s ease, filter .15s ease, opacity .15s ease; }
+        .donut-segment.is-active, .donut-segment:focus { stroke-width: 42; filter: drop-shadow(0 2px 3px rgba(31,41,55,.2)); }
+        .donut-segment:focus { outline: none; }
+        .donut-center-total { fill: #17366b; font-size: 30px; font-weight: 800; text-anchor: middle; }
+        .donut-center-label { fill: var(--muted); font-size: 10px; text-anchor: middle; }
+        .chart-tooltip { position: absolute; z-index: 5; max-width: 230px; padding: 9px 11px; border: 1px solid rgba(255,255,255,.12); border-radius: 10px; color: white; background: rgba(16,33,59,.94); box-shadow: 0 12px 30px rgba(15,31,55,.22); font-size: .72rem; line-height: 1.45; pointer-events: none; opacity: 0; transform: translateY(3px); transition: opacity .12s, transform .12s; backdrop-filter: blur(10px); }
+        .chart-tooltip.visible { opacity: 1; transform: translateY(0); }
+        .chart-tooltip strong { display: block; overflow-wrap: anywhere; }
+        .chart-caption { margin: 12px 0 0; color: var(--muted); font-size: .72rem; text-align: center; }
+        .footer { padding: 4px 0 35px; color: #73839a; text-align: center; font-size: .72rem; }
+        .footer strong { color: #435a77; }
+        @media (max-width: 980px) { .hero { grid-template-columns: 1fr; gap: 20px; } .hero-visual { display: none; } .upload-card { grid-template-columns: 1fr; } .metrics { grid-template-columns: repeat(3, 1fr); } }
+        @media (max-width: 680px) { .topbar-inner, .container { width: min(100% - 28px, 1180px); } .topbar-inner { min-height: 64px; } .platform-status { font-size: 0; padding: 9px; } .container { padding-top: 45px; } h1 { font-size: clamp(2.15rem, 12vw, 3.2rem); } .hero { margin-bottom: 30px; } .card { padding: 21px; border-radius: 18px; } .upload-aside { padding: 18px; } .metrics { grid-template-columns: repeat(2, 1fr); } .mutation-chart-layout { grid-template-columns: 1fr; } .mutation-legend { order: 2; } .donut-figure { order: 1; } .action-row button { width: 100%; } }
+        @media (max-width: 410px) { .brand-copy span { display: none; } .metrics { grid-template-columns: 1fr 1fr; } .metric { min-width: 0; padding: 14px 10px; } }
+        @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; } .science-bg svg { transform: none; } }
+        @media print { .science-bg, .topbar, .hero, .upload-card, #progressCard, .footer { display: none !important; } body { background: white; } .container { width: 100%; padding: 0; } .card { box-shadow: none; break-inside: avoid; } }
     </style>
 </head>
 <body>
-<div class="container">
-    <h1>Pharmacogenomics Pipeline</h1>
-
-    <div class="card">
-        <h2>Upload VCF</h2>
-        <form id="uploadForm">
-            <input type="file" id="vcfFile" accept=".vcf,.vcf.gz" required>
-            <input type="text" id="sampleId" placeholder="Sample ID (e.g. SAMPLE_001)" required>
-            <button type="submit" id="submitBtn">Upload and Analyze</button>
-        </form>
-        <div class="note">
-            Large files (whole chromosomes) are annotated up to a configurable cap so the
-            Ensembl VEP web API can keep up. Set the <code>MAX_VARIANTS_TO_VEP</code> env var to change it.
-        </div>
-    </div>
-
-    <div class="card" id="progressCard" style="display:none;">
-        <h2>Analysis Progress</h2>
-        <div class="bar"><div class="bar-fill" id="barFill" style="width:0%">0%</div></div>
-        <p id="statusMsg">Starting...</p>
-    </div>
-
-    <div id="resultsArea"></div>
+<a class="skip-link" href="#mainContent">Skip to analysis workspace</a>
+<div class="science-bg" aria-hidden="true">
+    <svg viewBox="0 0 1440 1000" preserveAspectRatio="xMidYMid slice">
+        <g class="float-a" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M92 115c80 55 80 140 0 195s-80 140 0 195"/><path d="M188 115c-80 55-80 140 0 195s80 140 0 195"/>
+            <path d="M112 145h56M94 202h94M94 260h94M110 318h60M94 376h94M112 434h56"/>
+        </g>
+        <g class="float-b" transform="translate(1120 120)" fill="none" stroke="currentColor" stroke-width="2">
+            <polygon points="70,0 140,40 140,120 70,160 0,120 0,40"/><polygon points="188,68 235,95 235,149 188,176 141,149 141,95"/>
+            <line x1="140" y1="82" x2="159" y2="93"/><circle cx="70" cy="0" r="7" fill="currentColor"/><circle cx="235" cy="149" r="7" fill="currentColor"/>
+        </g>
+        <g class="float-c" transform="translate(1045 690)" fill="none" stroke="currentColor" stroke-width="1.5">
+            <circle cx="100" cy="100" r="82"/><circle cx="100" cy="100" r="45"/><ellipse cx="100" cy="100" rx="118" ry="36" transform="rotate(35 100 100)"/><ellipse cx="100" cy="100" rx="118" ry="36" transform="rotate(-35 100 100)"/>
+            <circle cx="37" cy="56" r="7" fill="currentColor"/><circle cx="168" cy="45" r="7" fill="currentColor"/><circle cx="174" cy="159" r="7" fill="currentColor"/>
+        </g>
+        <g fill="currentColor">
+            <circle class="particle" cx="360" cy="170" r="3"/><circle class="particle" cx="480" cy="90" r="2"/><circle class="particle" cx="830" cy="180" r="3"/><circle class="particle" cx="930" cy="430" r="2"/><circle class="particle" cx="270" cy="740" r="3"/><circle class="particle" cx="720" cy="850" r="2"/>
+        </g>
+        <g opacity=".55" fill="none" stroke="currentColor" stroke-width="1">
+            <path d="M360 170L480 90L620 215L830 180L930 430"/><path d="M270 740L460 620L720 850L930 720"/>
+            <circle cx="620" cy="215" r="5"/><circle cx="460" cy="620" r="5"/><circle cx="930" cy="720" r="5"/>
+        </g>
+    </svg>
 </div>
+<header class="topbar">
+    <div class="topbar-inner">
+        <a class="brand" href="/" aria-label="HelixAI home">
+            <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M7 3c7 4 3 14 10 18M17 3C10 7 14 17 7 21M8.5 6h7M7 12h10M8.5 18h7"/></svg></span>
+            <span class="brand-copy"><strong>HelixAI</strong><span>Precision Medicine Intelligence</span></span>
+        </a>
+        <span class="platform-status"><span class="status-dot"></span> Research pipeline online</span>
+    </div>
+</header>
+<main class="container" id="mainContent">
+    <section class="hero" aria-labelledby="pageTitle">
+        <div class="hero-copy">
+            <div class="eyebrow">AI-assisted pharmacogenomics</div>
+            <h1 id="pageTitle">Decode variants.<br><span class="gradient-text">Discover response.</span></h1>
+            <p>Transform genomic variants into interpretable molecular, structural, and pharmacological evidence with an integrated precision medicine workflow.</p>
+            <div class="capabilities" aria-label="Platform capabilities">
+                <span class="capability"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M7 3c7 4 3 14 10 18M17 3C10 7 14 17 7 21"/></svg> Ensembl VEP</span>
+                <span class="capability"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M4.9 4.9l4.9 4.9M14.2 14.2l4.9 4.9M19.1 4.9l-4.9 4.9M9.8 14.2l-4.9 4.9"/></svg> AlphaFold</span>
+                <span class="capability"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 3h6l4 7-7 11-7-11z"/><path d="M5 10h14"/></svg> Drug Evidence</span>
+                <span class="capability"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="2"/><circle cx="5" cy="6" r="2"/><circle cx="19" cy="6" r="2"/><path d="M6.5 7.5l4 3M17.5 7.5l-4 3M12 14v5"/></svg> Molecular Intelligence</span>
+            </div>
+        </div>
+        <div class="hero-visual" aria-hidden="true">
+            <div class="molecule-orbit"></div>
+            <div class="helix-panel"><svg viewBox="0 0 180 210" fill="none" stroke-linecap="round"><defs><linearGradient id="helix" x1="0" y1="0" x2="180" y2="210"><stop stop-color="#2d68df"/><stop offset=".52" stop-color="#14a19a"/><stop offset="1" stop-color="#765bd9"/></linearGradient></defs><path d="M47 8c93 45-5 147 87 194M133 8C40 53 138 155 46 202" stroke="url(#helix)" stroke-width="7"/><g stroke="#7e9cc7" stroke-width="2"><path d="M61 23h58M43 54h94M42 88h96M44 122h92M43 157h94M60 189h60"/></g><g fill="#fff" stroke="url(#helix)" stroke-width="3"><circle cx="61" cy="23" r="5"/><circle cx="119" cy="23" r="5"/><circle cx="43" cy="54" r="5"/><circle cx="137" cy="54" r="5"/><circle cx="42" cy="88" r="5"/><circle cx="138" cy="88" r="5"/><circle cx="44" cy="122" r="5"/><circle cx="136" cy="122" r="5"/><circle cx="43" cy="157" r="5"/><circle cx="137" cy="157" r="5"/><circle cx="60" cy="189" r="5"/><circle cx="120" cy="189" r="5"/></g></svg></div>
+        </div>
+    </section>
+
+    <section class="card upload-card" aria-labelledby="uploadHeading">
+        <div class="upload-main">
+            <p class="section-kicker">Analysis workspace</p>
+            <h2 id="uploadHeading">Upload genomic variants</h2>
+            <p class="section-intro">Submit a VCF dataset or launch the validated demonstration workflow.</p>
+            <form id="uploadForm">
+                <div class="field"><label for="sampleId">Sample identifier</label><input type="text" id="sampleId" placeholder="e.g. SAMPLE_001" autocomplete="off" required></div>
+                <div class="field"><label for="vcfFile">Variant Call Format file</label><input type="file" id="vcfFile" accept=".vcf,.vcf.gz" required></div>
+                <div class="action-row">
+                    <button type="submit" id="submitBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 16V4M7 9l5-5 5 5M5 20h14"/></svg> Upload and Analyze</button>
+                    <button type="button" id="exampleBtn" class="secondary"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 5v14l11-7z"/></svg> Run Example Analysis</button>
+                </div>
+                <p class="example-help">Example source: <code>sample_pharmacogenomics.vcf</code></p>
+            </form>
+        </div>
+        <aside class="upload-aside" aria-label="Analysis capabilities">
+            <p class="section-kicker">Integrated workflow</p>
+            <strong>From sequence to evidence</strong>
+            <ul class="aside-list">
+                <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6L9 17l-5-5"/></svg><span>Variant annotation and coding consequence prioritization</span></li>
+                <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6L9 17l-5-5"/></svg><span>Protein mapping with structural confidence analysis</span></li>
+                <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6L9 17l-5-5"/></svg><span>PharmGKB evidence and diabetes-focused interpretation</span></li>
+            </ul>
+            <div class="note">Large datasets are annotated to the configured VEP cap to maintain reliable API throughput.</div>
+        </aside>
+    </section>
+
+    <section class="card" id="progressCard" style="display:none;" aria-live="polite">
+        <div class="progress-head"><div><p class="section-kicker">Computational pipeline</p><h2>Analysis in progress</h2></div><div class="analysis-pulse" aria-hidden="true"></div></div>
+        <div class="bar" role="progressbar" aria-label="Analysis progress"><div class="bar-fill" id="barFill" style="width:0%">0%</div></div>
+        <p id="statusMsg">Starting...</p>
+    </section>
+
+    <div id="resultsArea" aria-live="polite"></div>
+</main>
+<footer class="footer"><strong>HelixAI Pharmacogenomics Intelligence</strong> &middot; Research and educational use only &middot; Confirm findings with primary evidence sources</footer>
 
 <script>
+if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    window.addEventListener('pointermove', function(event) {
+        const x = (event.clientX / window.innerWidth - 0.5) * 8;
+        const y = (event.clientY / window.innerHeight - 0.5) * 8;
+        document.documentElement.style.setProperty('--parallax-x', x.toFixed(2) + 'px');
+        document.documentElement.style.setProperty('--parallax-y', y.toFixed(2) + 'px');
+    }, { passive: true });
+}
 let pollTimer = null;
 let currentAnalysisId = null;
+
+function setAnalysisControlsDisabled(disabled) {
+    document.getElementById('submitBtn').disabled = disabled;
+    document.getElementById('exampleBtn').disabled = disabled;
+}
+
+function beginAnalysis(uploadId, message) {
+    currentAnalysisId = uploadId;
+    document.getElementById('progressCard').style.display = 'block';
+    document.getElementById('resultsArea').innerHTML = '';
+    setProgress(5, message);
+    pollStatus(uploadId);
+}
 
 document.getElementById('uploadForm').addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -500,7 +750,7 @@ document.getElementById('uploadForm').addEventListener('submit', async (e) => {
     fd.append('file', file);
     fd.append('sample_id', sampleId);
 
-    document.getElementById('submitBtn').disabled = true;
+    setAnalysisControlsDisabled(true);
     document.getElementById('progressCard').style.display = 'block';
     document.getElementById('resultsArea').innerHTML = '';
     setProgress(5, 'Uploading file...');
@@ -509,18 +759,38 @@ document.getElementById('uploadForm').addEventListener('submit', async (e) => {
         const res = await fetch('/api/upload', { method: 'POST', body: fd });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || 'Upload failed');
-        currentAnalysisId = data.upload_id;
-        pollStatus(data.upload_id);
+        beginAnalysis(data.upload_id, 'Upload complete. Starting analysis...');
     } catch (err) {
         setProgress(0, 'Error: ' + err.message);
-        document.getElementById('submitBtn').disabled = false;
+        setAnalysisControlsDisabled(false);
+    }
+});
+
+document.getElementById('exampleBtn').addEventListener('click', async () => {
+    setAnalysisControlsDisabled(true);
+    document.getElementById('progressCard').style.display = 'block';
+    document.getElementById('resultsArea').innerHTML = '';
+    setProgress(5, 'Loading example VCF...');
+
+    try {
+        const res = await fetch('/api/example', { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'Could not start example analysis');
+        beginAnalysis(data.upload_id, 'Example loaded. Starting analysis...');
+    } catch (err) {
+        setProgress(0, 'Error: ' + err.message);
+        setAnalysisControlsDisabled(false);
     }
 });
 
 function setProgress(pct, msg) {
     const fill = document.getElementById('barFill');
+    const progressBar = fill.parentElement;
     fill.style.width = pct + '%';
     fill.textContent = Math.round(pct) + '%';
+    progressBar.setAttribute('aria-valuemin', '0');
+    progressBar.setAttribute('aria-valuemax', '100');
+    progressBar.setAttribute('aria-valuenow', String(Math.round(pct)));
     document.getElementById('statusMsg').textContent = msg;
 }
 
@@ -533,16 +803,17 @@ function pollStatus(id) {
             setProgress(data.progress, data.message);
             if (data.status === 'completed') {
                 clearInterval(pollTimer);
-                document.getElementById('submitBtn').disabled = false;
+                setAnalysisControlsDisabled(false);
                 renderResults(data.results);
             } else if (data.status === 'failed') {
                 clearInterval(pollTimer);
-                document.getElementById('submitBtn').disabled = false;
+                setAnalysisControlsDisabled(false);
                 setProgress(0, data.message);
             }
         } catch (err) {
             clearInterval(pollTimer);
-            document.getElementById('submitBtn').disabled = false;
+            setAnalysisControlsDisabled(false);
+            setProgress(0, 'Error checking analysis status: ' + err.message);
         }
     }, 1500);
 }
@@ -565,25 +836,10 @@ function renderResults(r) {
     }
     html += '</div>';
 
-    // Mutation-type chart
-    html += '<div class="card"><h2>Mutation Types</h2>';
-    var mtc = r.mutation_type_counts || {};
-    var types = Object.keys(mtc);
-    if (types.length === 0) {
-        html += '<p>No coding mutation types to chart.</p>';
-    } else {
-        var maxCount = Math.max.apply(null, types.map(function(t){return mtc[t];}));
-        types.sort(function(a,b){return mtc[b]-mtc[a];});
-        types.forEach(function(t){
-            var pct = Math.round(mtc[t] / maxCount * 100);
-            html += '<div style="margin:6px 0;">' +
-                    '<div style="font-size:12px;margin-bottom:2px;">' + t + ' (' + mtc[t] + ')</div>' +
-                    '<div style="background:#e5e7eb;border-radius:4px;">' +
-                    '<div style="width:' + pct + '%;background:#3b82f6;color:white;font-size:11px;' +
-                    'padding:2px 6px;border-radius:4px;">' + mtc[t] + '</div></div></div>';
-        });
-    }
-    html += '</div>';
+    // Interactive mutation-type donut chart (rendered after the HTML is inserted).
+    html += '<div class="card"><h2>Mutation Types</h2>' +
+            '<div id="mutationDonutChart" class="mutation-chart-host" ' +
+            'aria-label="Mutation consequence distribution"></div></div>';
 
     // Mutations table + download
     html += '<div class="card"><h2>Coding Mutations</h2>';
@@ -598,7 +854,7 @@ function renderResults(r) {
                 '<th>Consequence</th><th>Amino Acid (HGVSp)</th></tr>';
         r.mutations.slice(0, 200).forEach(m => {
             var isDiab = (r.diabetes_findings || []).some(function(f){return f.gene_symbol === m.gene_symbol;});
-            var geneCell = (m.gene_symbol || '-') + (isDiab ? ' <span class="badge" style="background:#dc2626;">diabetes</span>' : '');
+            var geneCell = (m.gene_symbol || '-') + (isDiab ? ' <span class="badge">diabetes</span>' : '');
             html += '<tr><td>' + m.position + '</td><td>' + m.ref + '&rarr;' + m.alt + '</td>' +
                     '<td>' + geneCell + '</td>' +
                     '<td>' + (m.consequence_terms || []).join(', ') + '</td>' +
@@ -611,7 +867,7 @@ function renderResults(r) {
 
     // Diabetes interpretation
     html += '<div class="card"><h2>Diabetes-Associated Findings</h2>';
-    html += '<p style="font-size:13px;color:#6b7280;">Interpretation from curated diabetes gene knowledge ' +
+    html += '<p class="section-description">Interpretation from curated diabetes gene knowledge ' +
             '(OMIM, PharmGKB, GWAS Catalog). For research/education only, not diagnostic. ' +
             'Use the links to confirm each finding.</p>';
     var df = r.diabetes_findings || [];
@@ -619,19 +875,19 @@ function renderResults(r) {
         html += '<p>No mutations in known diabetes-associated genes were found in the annotated set.</p>';
     } else {
         df.forEach(function(f){
-            html += '<div style="border:1px solid #e5e7eb;border-radius:8px;padding:12px;margin-bottom:12px;">';
-            html += '<h3 style="margin:0 0 4px 0;">' + f.gene_symbol +
-                    ' <span class="badge" style="background:#dc2626;">' + f.category + '</span></h3>';
-            html += '<p style="margin:4px 0;font-size:13px;"><b>Variant:</b> ' + f.position + ' ' + f.change +
+            html += '<div class="finding-card">';
+            html += '<h3>' + f.gene_symbol +
+                    ' <span class="badge">' + f.category + '</span></h3>';
+            html += '<p class="finding-meta"><b>Variant:</b> ' + f.position + ' ' + f.change +
                     ' | ' + (f.consequence_terms||[]).join(', ') +
                     (f.amino_acid_change ? ' | ' + f.amino_acid_change : '') + '</p>';
-            html += '<p style="margin:4px 0;font-size:13px;"><b>Gene role:</b> ' + f.role + '</p>';
-            html += '<p style="margin:4px 0;font-size:13px;"><b>Diabetes significance:</b> ' + f.significance + '</p>';
-            html += '<p style="margin:4px 0;font-size:13px;"><b>Treatment relevance:</b> ' + f.treatment + '</p>';
-            html += '<p style="margin:4px 0;font-size:12px;">Confirm on: ' +
-                    '<a href="' + f.pharmgkb_url + '" target="_blank">PharmGKB</a> | ' +
-                    '<a href="' + f.omim_url + '" target="_blank">OMIM</a> | ' +
-                    '<a href="' + f.gwas_url + '" target="_blank">GWAS Catalog</a></p>';
+            html += '<p class="finding-meta"><b>Gene role:</b> ' + f.role + '</p>';
+            html += '<p class="finding-meta"><b>Diabetes significance:</b> ' + f.significance + '</p>';
+            html += '<p class="finding-meta"><b>Treatment relevance:</b> ' + f.treatment + '</p>';
+            html += '<p class="evidence-links">Confirm on: ' +
+                    '<a href="' + f.pharmgkb_url + '" target="_blank" rel="noopener noreferrer">PharmGKB</a> &middot; ' +
+                    '<a href="' + f.omim_url + '" target="_blank" rel="noopener noreferrer">OMIM</a> &middot; ' +
+                    '<a href="' + f.gwas_url + '" target="_blank" rel="noopener noreferrer">GWAS Catalog</a></p>';
             html += '</div>';
         });
     }
@@ -663,18 +919,18 @@ function renderResults(r) {
 
     // Drugs
     html += '<div class="card"><h2>Drug Interactions</h2>';
-    html += '<p style="font-size:13px;color:#6b7280;">Evidence comes from PharmGKB clinical annotations. ' +
-            'Click <b>PharmGKB</b> to open the exact annotation page and confirm the gene\\u2013drug association. ' +
-            'Levels: <b style="color:#059669;">1A/1B</b> strongest, <b style="color:#2563eb;">2A/2B</b> moderate, ' +
-            '<b style="color:#d97706;">3/4</b> lower. <i>no_pgx_evidence</i> = no PharmGKB clinical annotation found for that pair.</p>';
+    html += '<p class="section-description">Evidence comes from PharmGKB clinical annotations. ' +
+            'Open the exact annotation to confirm each gene\\u2013drug association. ' +
+            'Levels 1A/1B are strongest, 2A/2B moderate, and 3/4 lower. ' +
+            '<i>no_pgx_evidence</i> indicates no PharmGKB clinical annotation was found for that pair.</p>';
     if ((r.drug_results || []).length === 0) {
         html += '<p>No drug interactions found.</p>';
     } else {
         r.drug_results.forEach(dr => {
             var gene = dr.gene_symbol;
             var genePgkb = 'https://www.pharmgkb.org/search?query=' + encodeURIComponent(gene);
-            html += '<h3>' + gene +
-                    ' <a href="' + genePgkb + '" target="_blank" style="font-size:12px;font-weight:normal;">PharmGKB gene &#8599;</a></h3>';
+            html += '<h3 class="gene-title">' + gene +
+                    ' <a href="' + genePgkb + '" target="_blank" rel="noopener noreferrer">PharmGKB gene &#8599;</a></h3>';
             html += '<table><tr><th>Drug</th><th>Action</th><th>Evidence</th><th>Confirm on</th></tr>';
             (dr.matched_drugs || []).forEach(d => {
                 var name = d.drug_name || '-';
@@ -701,6 +957,170 @@ function renderResults(r) {
     html += '</div>';
 
     document.getElementById('resultsArea').innerHTML = html;
+    document.getElementById('resultsArea').querySelectorAll('table').forEach(function(table) {
+        table.setAttribute('tabindex', '0');
+        table.setAttribute('aria-label', 'Scrollable scientific results table');
+    });
+    renderMutationDonut(r.mutation_type_counts || {});
+}
+
+function renderMutationDonut(rawCounts) {
+    const host = document.getElementById('mutationDonutChart');
+    if (!host) return;
+
+    const entries = Object.keys(rawCounts || {}).map(function(name) {
+        return { name: name, count: Number(rawCounts[name]) };
+    }).filter(function(item) {
+        return item.name && Number.isFinite(item.count) && item.count > 0;
+    }).sort(function(a, b) {
+        return b.count - a.count || a.name.localeCompare(b.name);
+    });
+
+    host.replaceChildren();
+    if (entries.length === 0) {
+        const empty = document.createElement('p');
+        empty.textContent = 'No coding mutation types to chart.';
+        host.appendChild(empty);
+        host.style.minHeight = '0';
+        return;
+    }
+
+    host.style.minHeight = '';
+    const total = entries.reduce(function(sum, item) { return sum + item.count; }, 0);
+    const colors = ['#2563eb', '#7c3aed', '#0891b2', '#059669', '#d97706', '#dc2626', '#db2777', '#4f46e5', '#65a30d', '#ea580c'];
+    const svgNS = 'http://www.w3.org/2000/svg';
+    const layout = document.createElement('div');
+    layout.className = 'mutation-chart-layout';
+    const legend = document.createElement('div');
+    legend.className = 'mutation-legend';
+    legend.setAttribute('aria-label', 'Mutation type legend');
+    const figure = document.createElement('div');
+    figure.className = 'donut-figure';
+    const svg = document.createElementNS(svgNS, 'svg');
+    svg.classList.add('donut-chart');
+    svg.setAttribute('viewBox', '0 0 260 260');
+    svg.setAttribute('role', 'img');
+    svg.setAttribute('aria-label', 'Donut chart of mutation consequence calls');
+    const title = document.createElementNS(svgNS, 'title');
+    title.textContent = 'Mutation consequence distribution: ' + total + ' total calls';
+    svg.appendChild(title);
+
+    const background = document.createElementNS(svgNS, 'circle');
+    background.setAttribute('cx', '130');
+    background.setAttribute('cy', '130');
+    background.setAttribute('r', '86');
+    background.setAttribute('fill', 'none');
+    background.setAttribute('stroke', '#e5e7eb');
+    background.setAttribute('stroke-width', '34');
+    svg.appendChild(background);
+
+    const circumference = 2 * Math.PI * 86;
+    let offset = 0;
+    const segments = [];
+    const legendItems = [];
+    const tooltip = document.createElement('div');
+    tooltip.className = 'chart-tooltip';
+    tooltip.setAttribute('role', 'tooltip');
+
+    function setActive(index, active) {
+        segments[index].classList.toggle('is-active', active);
+        legendItems[index].classList.toggle('is-active', active);
+        segments.forEach(function(segment, i) {
+            segment.style.opacity = active && i !== index ? '0.45' : '1';
+        });
+    }
+
+    function showTooltip(index, clientX, clientY) {
+        const item = entries[index];
+        const pct = item.count / total * 100;
+        tooltip.replaceChildren();
+        const strong = document.createElement('strong');
+        strong.textContent = item.name;
+        const detail = document.createElement('span');
+        detail.textContent = item.count + ' call' + (item.count === 1 ? '' : 's') + ' \u2022 ' + pct.toFixed(1) + '%';
+        tooltip.append(strong, detail);
+        tooltip.classList.add('visible');
+        const rect = figure.getBoundingClientRect();
+        let left = clientX == null ? rect.width / 2 : clientX - rect.left;
+        let top = clientY == null ? rect.height / 2 : clientY - rect.top;
+        left = Math.max(8, Math.min(left + 12, rect.width - tooltip.offsetWidth - 8));
+        top = Math.max(8, Math.min(top + 12, rect.height - tooltip.offsetHeight - 8));
+        tooltip.style.left = left + 'px';
+        tooltip.style.top = top + 'px';
+    }
+
+    function hideTooltip(index) {
+        setActive(index, false);
+        tooltip.classList.remove('visible');
+    }
+
+    entries.forEach(function(item, index) {
+        const fraction = item.count / total;
+        const segment = document.createElementNS(svgNS, 'circle');
+        segment.classList.add('donut-segment');
+        segment.setAttribute('cx', '130');
+        segment.setAttribute('cy', '130');
+        segment.setAttribute('r', '86');
+        segment.setAttribute('fill', 'none');
+        segment.setAttribute('stroke', colors[index % colors.length]);
+        segment.setAttribute('stroke-dasharray', (fraction * circumference) + ' ' + circumference);
+        segment.setAttribute('stroke-dashoffset', String(-offset * circumference));
+        segment.setAttribute('transform', 'rotate(-90 130 130)');
+        segment.setAttribute('tabindex', '0');
+        segment.setAttribute('role', 'img');
+        segment.setAttribute('aria-label', item.name + ': ' + item.count + ', ' + (fraction * 100).toFixed(1) + ' percent');
+        offset += fraction;
+        svg.appendChild(segment);
+        segments.push(segment);
+
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'mutation-legend-item';
+        button.setAttribute('aria-label', item.name + ': ' + item.count + ', ' + (fraction * 100).toFixed(1) + ' percent');
+        const swatch = document.createElement('span');
+        swatch.className = 'mutation-swatch';
+        swatch.style.backgroundColor = colors[index % colors.length];
+        const name = document.createElement('span');
+        name.className = 'mutation-name';
+        name.textContent = item.name;
+        const value = document.createElement('span');
+        value.className = 'mutation-value';
+        value.textContent = item.count + ' (' + (fraction * 100).toFixed(1) + '%)';
+        button.append(swatch, name, value);
+        legend.appendChild(button);
+        legendItems.push(button);
+
+        segment.addEventListener('pointerenter', function(event) { setActive(index, true); showTooltip(index, event.clientX, event.clientY); });
+        segment.addEventListener('pointermove', function(event) { showTooltip(index, event.clientX, event.clientY); });
+        segment.addEventListener('pointerleave', function() { hideTooltip(index); });
+        segment.addEventListener('focus', function() { setActive(index, true); showTooltip(index); });
+        segment.addEventListener('blur', function() { hideTooltip(index); });
+        button.addEventListener('pointerenter', function() { setActive(index, true); showTooltip(index); });
+        button.addEventListener('pointerleave', function() { hideTooltip(index); });
+        button.addEventListener('focus', function() { setActive(index, true); showTooltip(index); });
+        button.addEventListener('blur', function() { hideTooltip(index); });
+    });
+
+    const totalText = document.createElementNS(svgNS, 'text');
+    totalText.classList.add('donut-center-total');
+    totalText.setAttribute('x', '130');
+    totalText.setAttribute('y', '126');
+    totalText.textContent = String(total);
+    svg.appendChild(totalText);
+    const labelText = document.createElementNS(svgNS, 'text');
+    labelText.classList.add('donut-center-label');
+    labelText.setAttribute('x', '130');
+    labelText.setAttribute('y', '146');
+    labelText.textContent = 'consequence calls';
+    svg.appendChild(labelText);
+
+    figure.append(svg, tooltip);
+    const caption = document.createElement('p');
+    caption.className = 'chart-caption';
+    caption.textContent = 'Hover over, tap, or focus a segment to inspect its count and percentage.';
+    figure.appendChild(caption);
+    layout.append(legend, figure);
+    host.appendChild(layout);
 }
 
 function metric(val, label) {
