@@ -118,52 +118,49 @@ class VEPAnnotator:
         return annotated_variants
         
     async def _query_vep_api(self, vep_input: List[str]) -> List[Dict[str, Any]]:
-        """Query the VEP REST API with batch input"""
-        
-        headers = {
-            'Content-Type': 'application/json',
-            'Accept': 'application/json'
-        }
-        
-        # VEP POST request data
+        """Query VEP with bounded retries for transient service failures."""
+        headers = {'Content-Type': 'application/json', 'Accept': 'application/json'}
         data = {
             'variants': vep_input,
-            'canonical': 1,  # Only canonical transcripts
-            'hgvs': 1,       # Include HGVS notation
-            'protein': 1,    # Include protein consequences
-            'xref_refseq': 1,# Include RefSeq cross-references  
-            'uniprot': 1,    # Include UniProt cross-references
-            'domains': 1,    # Include protein domain information
+            'canonical': 1,
+            'hgvs': 1,
+            'protein': 1,
+            'xref_refseq': 1,
+            'uniprot': 1,
+            'domains': 1,
         }
-        
-        try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
-                async with session.post(
-                    self.base_url,
-                    headers=headers,
-                    json=data
-                ) as response:
-                    
-                    if response.status == 200:
-                        result = await response.json()
-                        return result if isinstance(result, list) else []
-                    elif response.status == 429:
-                        # Rate limited - wait and retry
-                        logger.warning("VEP rate limit hit, waiting...")
-                        await asyncio.sleep(2)
-                        return await self._query_vep_api(vep_input)
-                    else:
-                        logger.error(f"VEP API error: {response.status}")
+        retryable = {429, 500, 502, 503, 504}
+
+        for attempt in range(3):
+            try:
+                timeout = aiohttp.ClientTimeout(total=60)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.post(self.base_url, headers=headers, json=data) as response:
+                        if response.status == 200:
+                            result = await response.json()
+                            if isinstance(result, list):
+                                return result
+                            logger.error("VEP returned an unexpected response shape")
+                            return []
                         response_text = await response.text()
-                        logger.error(f"Response: {response_text}")
-                        return []
-                        
-        except asyncio.TimeoutError:
-            logger.error("VEP API request timed out")
-            return []
-        except Exception as e:
-            logger.error(f"Error querying VEP API: {str(e)}")
-            return []
+                        if response.status not in retryable:
+                            logger.error("VEP API error %s: %s", response.status, response_text[:500])
+                            return []
+                        logger.warning(
+                            "Temporary VEP API error %s (attempt %s/3): %s",
+                            response.status, attempt + 1, response_text[:200],
+                        )
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                logger.warning("VEP request failed (attempt %s/3): %s", attempt + 1, exc)
+            except Exception as exc:
+                logger.error("Unexpected VEP request error: %s", exc)
+                return []
+
+            if attempt < 2:
+                await asyncio.sleep(2 ** attempt)
+
+        logger.error("VEP remained unavailable after 3 attempts")
+        return []
             
     def _extract_annotations(self, vep_result: Dict[str, Any]) -> Dict[str, Any]:
         """Extract relevant annotations from VEP result"""

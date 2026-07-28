@@ -9,6 +9,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import statistics
 
+from .pgx.models import GenomeBuild
+from .pgx.vcf import read_vcf_document
+
 try:
     import cyvcf2
 except ImportError:
@@ -25,6 +28,11 @@ class VCFParser:
         self.min_qual = self.qc_thresholds.get("min_qual", 30)
         self.min_depth = self.qc_thresholds.get("min_depth", 10)
         self.max_missing_rate = self.qc_thresholds.get("max_missing_rate", 0.1)
+        # Star-allele matching must never guess a build. This optional value is
+        # only a declared input override; otherwise the VCF header is inspected.
+        self.genome_build = config.get("genome_build")
+        if self.genome_build and GenomeBuild.parse(self.genome_build) is GenomeBuild.UNKNOWN:
+            raise ValueError(f"Unsupported genome_build: {self.genome_build}")
         
     async def parse_vcf(self, file_path: str, sample_id: Optional[str] = None) -> Dict[str, Any]:
         """
@@ -38,13 +46,35 @@ class VCFParser:
             Dictionary containing variants and QC summary
         """
         try:
+            # Parse the evidence contract first so every path preserves all
+            # samples, ALT alleles, GT delimiters, PS, and raw FORMAT values.
+            # Legacy variants remain below for existing VEP/UI consumers.
+            document = read_vcf_document(file_path, self.genome_build)
             if cyvcf2:
-                return await self._parse_with_cyvcf2(file_path, sample_id)
+                result = await self._parse_with_cyvcf2(file_path, sample_id)
             else:
-                return await self._parse_basic_vcf(file_path, sample_id)
+                result = await self._parse_basic_vcf(file_path, sample_id)
+            result["vcf_metadata"] = document.metadata.to_dict()
+            result["pgx_records"] = [self._pgx_record_to_dict(record) for record in document.records]
+            return result
         except Exception as e:
             logger.error(f"Error parsing VCF {file_path}: {str(e)}")
             raise
+
+    @staticmethod
+    def _pgx_record_to_dict(record) -> Dict[str, Any]:
+        return {
+            "chrom": record.chrom,
+            "pos": record.pos,
+            "id": record.record_id,
+            "ref": record.ref,
+            "alts": list(record.alts),
+            "qual": record.qual,
+            "filter": record.filter_status,
+            "info_raw": record.info_raw,
+            "format_keys": list(record.format_keys),
+            "calls": [call.to_dict() for call in record.calls],
+        }
             
     async def _parse_with_cyvcf2(self, file_path: str, sample_id: Optional[str]) -> Dict[str, Any]:
         """Parse VCF using cyvcf2 library (preferred method)"""

@@ -13,6 +13,9 @@ env/
 uploads/
 results/
 *.db
+*.sqlite
+*.sqlite3
+data/clinvar/
 
 # Local VCF test data (keep only examples/)
 *.vcf
@@ -23,6 +26,9 @@ results/
 # Env / secrets
 .env
 *.pem
+
+# External repositories used for architecture/algorithm review only
+reference_repositories/
 
 # OS / editor
 .DS_Store

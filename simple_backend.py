@@ -13,6 +13,7 @@ Pipeline per upload:
 
 import asyncio
 import json
+import math
 import os
 import sys
 from pathlib import Path
@@ -34,7 +35,12 @@ try:
     from modules.vep_annotator import VEPAnnotator
     from modules.protein_structure import ProteinStructureAnalyzer
     from modules.drug_matcher import DrugMatcher
+    from modules.clinvar_annotator import ClinVarAnnotator
+    from modules.diabetes_common_risk import DiabetesCommonRiskAnnotator
     from modules import diabetes_kb
+    from modules.gwas import (
+        run_gwas, run_genotype_only_manhattan, parse_phenotype_table, GWASInputError,
+    )
     modules_available = True
     module_import_error = None
 except Exception as e:  # catch ImportError AND any error raised at import time
@@ -55,6 +61,7 @@ BASE_DIR = Path(__file__).resolve().parent
 EXAMPLE_VCF_PATH = BASE_DIR / "examples" / "sample_pharmacogenomics.vcf"
 MAX_VARIANTS_TO_VEP = int(os.getenv("MAX_VARIANTS_TO_VEP", "300"))
 MAX_GENES_FOR_STRUCTURE = int(os.getenv("MAX_GENES_FOR_STRUCTURE", "15"))
+MAX_MANHATTAN_POINTS = int(os.getenv("MAX_MANHATTAN_POINTS", "12000"))
 VEP_BATCH_TIMEOUT = 90        # seconds per VEP batch
 STRUCTURE_TIMEOUT = 60        # seconds per structure lookup
 DRUG_TIMEOUT = 20             # seconds per gene drug lookup
@@ -80,7 +87,7 @@ analysis_storage: Dict[str, "AnalysisStatus"] = {}
 async def initialize_components():
     global pipeline_components
     try:
-        with open("config.json", "r") as f:
+        with (BASE_DIR / "config.json").open("r", encoding="utf-8") as f:
             config = json.load(f)
 
         if modules_available:
@@ -90,6 +97,8 @@ async def initialize_components():
                 "vep_annotator": VEPAnnotator(config),
                 "structure_analyzer": ProteinStructureAnalyzer(config),
                 "drug_matcher": DrugMatcher(config),
+                "clinvar_annotator": ClinVarAnnotator(config, BASE_DIR),
+                "diabetes_common_risk": DiabetesCommonRiskAnnotator(config, BASE_DIR),
             }
             print("Pipeline components initialized")
         else:
@@ -134,6 +143,7 @@ async def health_check():
         "components_available": modules_available,
         "module_import_error": module_import_error,
         "max_variants_to_vep": MAX_VARIANTS_TO_VEP,
+        "max_manhattan_points": MAX_MANHATTAN_POINTS,
         "timestamp": datetime.now().isoformat(),
     }
 
@@ -143,9 +153,12 @@ async def upload_file(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     sample_id: str = Form(...),
+    genome_build: str = Form("auto"),
 ):
     if not file.filename.lower().endswith((".vcf", ".vcf.gz")):
         raise HTTPException(status_code=400, detail="File must be a VCF file")
+    if genome_build not in {"auto", "GRCh37", "GRCh38"}:
+        raise HTTPException(status_code=400, detail="Genome build must be auto, GRCh37, or GRCh38")
 
     upload_id = str(uuid.uuid4())
     upload_dir = Path("uploads")
@@ -157,7 +170,9 @@ async def upload_file(
         with open(file_path, "wb") as f:
             f.write(content)
 
-        background_tasks.add_task(analyze_file, upload_id, str(file_path), sample_id)
+        background_tasks.add_task(
+            analyze_file, upload_id, str(file_path), sample_id, genome_build,
+        )
 
         return SimpleUploadResponse(
             upload_id=upload_id,
@@ -167,6 +182,97 @@ async def upload_file(
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
+
+@app.post("/api/gwas")
+async def run_gwas_endpoint(
+    vcf_file: UploadFile = File(...),
+    phenotype_file: Optional[UploadFile] = File(None),
+    genome_build: str = Form("auto"),
+    phenotype_column: str = Form(""),
+):
+    """Compute a real Manhattan plot from a multi-sample VCF.
+
+    Two modes, both requiring many samples in one multi-sample VCF:
+      * With a phenotype/trait table -> genuine trait association test
+        (linear/logistic regression) producing genome-wide p-values.
+      * Without a phenotype -> Hardy-Weinberg-equilibrium test computed from
+        genotype counts alone. This is genotyping/population-structure QC,
+        NOT a trait-association result, and is labelled as such.
+
+    A phenotype can never be derived from a VCF: it is an external observed
+    trait. Testing genotypes against a phenotype invented from those same
+    genotypes would be circular and statistically invalid, so we do not do it.
+    """
+    if not (modules_available and "vcf_parser" in pipeline_components):
+        detail = module_import_error or "components not initialized (check config.json)"
+        raise HTTPException(status_code=503, detail=f"Pipeline modules unavailable: {detail}")
+    if not vcf_file.filename.lower().endswith((".vcf", ".vcf.gz")):
+        raise HTTPException(status_code=400, detail="Genotype file must be a VCF (.vcf or .vcf.gz)")
+    if genome_build not in {"auto", "GRCh37", "GRCh38"}:
+        raise HTTPException(status_code=400, detail="Genome build must be auto, GRCh37, or GRCh38")
+
+    has_phenotype = phenotype_file is not None and bool(getattr(phenotype_file, "filename", ""))
+
+    upload_dir = Path("uploads")
+    upload_dir.mkdir(exist_ok=True)
+    token = str(uuid.uuid4())
+    vcf_path = upload_dir / f"{token}_{vcf_file.filename}"
+
+    try:
+        vcf_path.write_bytes(await vcf_file.read())
+        vcf_parser = pipeline_components["vcf_parser"]
+
+        if has_phenotype:
+            phenotype_text = (await phenotype_file.read()).decode("utf-8", errors="replace")
+            phenotype_spec = parse_phenotype_table(
+                phenotype_text, phenotype_column=phenotype_column or None,
+            )
+            seed_sample = phenotype_spec["samples"][0]
+            vcf_results = await vcf_parser.parse_vcf(str(vcf_path), seed_sample)
+            metadata = vcf_results.get("vcf_metadata", {}) or {}
+            resolved_build = genome_build if genome_build in {"GRCh37", "GRCh38"} else metadata.get("genome_build", "unknown")
+            plot = await asyncio.to_thread(
+                run_gwas,
+                vcf_results.get("pgx_records", []) or [],
+                phenotype_spec,
+                resolved_build,
+            )
+            return {
+                "status": plot["status"],
+                "mode": "association",
+                "genome_build": resolved_build,
+                "vcf_samples": len(metadata.get("sample_ids", []) or []),
+                "phenotype_samples": len(phenotype_spec["samples"]),
+                "manhattan_plot": plot,
+            }
+
+        # Genotype-only mode: no phenotype supplied.
+        vcf_results = await vcf_parser.parse_vcf(str(vcf_path), "")
+        metadata = vcf_results.get("vcf_metadata", {}) or {}
+        resolved_build = genome_build if genome_build in {"GRCh37", "GRCh38"} else metadata.get("genome_build", "unknown")
+        plot = await asyncio.to_thread(
+            run_genotype_only_manhattan,
+            vcf_results.get("pgx_records", []) or [],
+            resolved_build,
+        )
+        return {
+            "status": plot["status"],
+            "mode": "hwe",
+            "genome_build": resolved_build,
+            "vcf_samples": len(metadata.get("sample_ids", []) or []),
+            "phenotype_samples": 0,
+            "manhattan_plot": plot,
+        }
+    except GWASInputError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:  # pragma: no cover - defensive
+        raise HTTPException(status_code=500, detail=f"GWAS failed: {exc}")
+    finally:
+        try:
+            vcf_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 @app.post("/api/example", response_model=SimpleUploadResponse)
@@ -181,6 +287,7 @@ async def analyze_example(background_tasks: BackgroundTasks):
         upload_id,
         str(EXAMPLE_VCF_PATH),
         "SAMPLE_PHARMACOGENOMICS_EXAMPLE",
+        "auto",
     )
     return SimpleUploadResponse(
         upload_id=upload_id,
@@ -202,7 +309,185 @@ def _set(upload_id: str, *, status=None, progress=None, message=None, results=No
         a.results = results
 
 
-async def analyze_file(upload_id: str, file_path: str, sample_id: str):
+def _extract_carried_alleles(vcf_results: Dict[str, Any], requested_sample: str):
+    """Expand called ALT indices for one explicitly resolved VCF sample."""
+    metadata = vcf_results.get("vcf_metadata", {}) or {}
+    sample_ids = list(metadata.get("sample_ids", []) or [])
+    warnings = []
+    if not sample_ids:
+        return [], {
+            "status": "no_genotype_samples", "requested_sample": requested_sample,
+            "selected_sample": None, "sample_count": 0,
+            "warnings": ["The VCF has no genotype sample columns; carried alleles were not evaluated"],
+        }
+    if requested_sample in sample_ids:
+        selected = requested_sample
+    elif len(sample_ids) == 1:
+        selected = sample_ids[0]
+        warnings.append(
+            f"Requested label '{requested_sample}' did not match the VCF sample; "
+            "the sole VCF sample was selected explicitly"
+        )
+    else:
+        raise ValueError(
+            f"Sample '{requested_sample}' was not found in this multi-sample VCF; "
+            "enter an exact VCF sample ID"
+        )
+
+    carried = []
+    for record in vcf_results.get("pgx_records", []) or []:
+        call = next((item for item in record.get("calls", []) if item.get("sample_id") == selected), None)
+        if not call:
+            continue
+        allele_indices = call.get("allele_indices", []) or []
+        for alt_index in sorted({index for index in allele_indices if isinstance(index, int) and index > 0}):
+            alts = record.get("alts", []) or []
+            if alt_index > len(alts):
+                warnings.append(f"Invalid GT allele index at {record.get('chrom')}:{record.get('pos')}")
+                continue
+            carried.append({
+                "chrom": record.get("chrom"), "pos": record.get("pos"),
+                "ref": record.get("ref"), "alt": alts[alt_index - 1],
+                "alt_index": alt_index, "alt_count": len(alts),
+                "record_id": record.get("id"), "filter": record.get("filter"),
+                "info_raw": record.get("info_raw", "."),
+                "sample_id": selected, "raw_gt": call.get("raw_gt"),
+                "call_state": call.get("state"), "phased": bool(call.get("phased")),
+                "phase_set": call.get("phase_set"),
+            })
+    return carried, {
+        "status": "complete", "requested_sample": requested_sample,
+        "selected_sample": selected, "sample_count": len(sample_ids), "warnings": warnings,
+    }
+
+
+def _parse_info_values(info_raw: str) -> Dict[str, str]:
+    values = {}
+    for item in str(info_raw or ".").split(";"):
+        key, separator, value = item.partition("=")
+        if separator and key:
+            values[key.upper()] = value
+    return values
+
+
+def _extract_manhattan_data(
+    vcf_results: Dict[str, Any],
+    carried_alleles: List[Dict[str, Any]],
+    sample_selection: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Extract true association p-values without using VEP or inventing scores."""
+    aliases = ("PVAL", "PVALUE", "P_VALUE", "P")
+    scope = "carried_alleles"
+    source_alleles = list(carried_alleles)
+    if sample_selection.get("status") == "no_genotype_samples" or not source_alleles:
+        scope = "all_site_alleles"
+        source_alleles = []
+        for record in vcf_results.get("pgx_records", []) or []:
+            alts = record.get("alts", []) or []
+            for alt_index, alt in enumerate(alts, 1):
+                source_alleles.append({
+                    "chrom": record.get("chrom"), "pos": record.get("pos"),
+                    "ref": record.get("ref"), "alt": alt,
+                    "alt_index": alt_index, "alt_count": len(alts),
+                    "record_id": record.get("id"),
+                    "info_raw": record.get("info_raw", "."),
+                })
+
+    points = []
+    invalid_count = 0
+    fields_seen = set()
+    for allele in source_alleles:
+        info = _parse_info_values(allele.get("info_raw", "."))
+        field = next((name for name in aliases if name in info), None)
+        if not field:
+            continue
+        fields_seen.add(field)
+        raw_values = str(info[field]).split(",")
+        alt_count = int(allele.get("alt_count") or 1)
+        alt_index = int(allele.get("alt_index") or 1)
+        raw_value = raw_values[alt_index - 1] if len(raw_values) == alt_count else raw_values[0]
+        try:
+            p_value = float(raw_value)
+        except (TypeError, ValueError):
+            invalid_count += 1
+            continue
+        if not math.isfinite(p_value) or p_value <= 0 or p_value > 1:
+            invalid_count += 1
+            continue
+        points.append({
+            "chrom": str(allele.get("chrom") or ""),
+            "pos": int(allele.get("pos") or 0),
+            "id": allele.get("record_id"),
+            "ref": allele.get("ref"), "alt": allele.get("alt"),
+            "p_value": p_value,
+            "minus_log10_p": -math.log10(max(p_value, 1e-300)),
+            "field": field,
+        })
+
+    original_count = len(points)
+    downsampled = False
+    if len(points) > MAX_MANHATTAN_POINTS:
+        significant = [point for point in points if point["p_value"] <= 1e-5]
+        ordinary = [point for point in points if point["p_value"] > 1e-5]
+        if len(significant) >= MAX_MANHATTAN_POINTS:
+            points = sorted(significant, key=lambda point: point["p_value"])[:MAX_MANHATTAN_POINTS]
+        else:
+            remaining = MAX_MANHATTAN_POINTS - len(significant)
+            if remaining and ordinary:
+                step = max(1, math.ceil(len(ordinary) / remaining))
+                ordinary = ordinary[::step][:remaining]
+            else:
+                ordinary = []
+            points = significant + ordinary
+        downsampled = True
+
+    return {
+        "status": "available" if points else "distribution_only",
+        "scope": scope,
+        "inspected_alleles": len(source_alleles),
+        "p_value_fields": sorted(fields_seen),
+        "point_count": len(points),
+        "original_point_count": original_count,
+        "invalid_p_value_count": invalid_count,
+        "downsampled": downsampled,
+        "max_points": MAX_MANHATTAN_POINTS,
+        "genome_wide_threshold": 5e-8,
+        "suggestive_threshold": 1e-5,
+        "points": points,
+        "distribution": _chromosome_distribution(source_alleles),
+        "message": None if points else (
+            "This VCF has no association p-values. A chromosome variant distribution is shown instead; "
+            "it is not a Manhattan significance plot."
+        ),
+    }
+
+
+def _chromosome_distribution(alleles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Count unique sample/site alleles per chromosome without inventing significance."""
+    chromosomes: Dict[str, set] = {}
+    for allele in alleles:
+        chrom = str(allele.get("chrom") or "").removeprefix("chr")
+        if not chrom:
+            continue
+        key = (
+            int(allele.get("pos") or 0),
+            str(allele.get("ref") or "").upper(),
+            str(allele.get("alt") or "").upper(),
+        )
+        chromosomes.setdefault(chrom, set()).add(key)
+    return [{"chrom": chrom, "count": len(values)} for chrom, values in chromosomes.items()]
+
+
+def _evidence_status(result: Dict[str, Any]) -> Dict[str, Any]:
+    return {key: result.get(key) for key in (
+        "status", "build", "inspected_alleles", "evaluated_alleles", "matched_records",
+        "reportable_count", "source", "warnings", "score_calculated",
+    ) if key in result}
+
+
+async def analyze_file(
+    upload_id: str, file_path: str, sample_id: str, genome_build_override: str = "auto",
+):
     analysis_storage[upload_id] = AnalysisStatus(
         id=upload_id,
         status="running",
@@ -222,20 +507,58 @@ async def analyze_file(upload_id: str, file_path: str, sample_id: str):
         vep = pipeline_components["vep_annotator"]
         structure_analyzer = pipeline_components["structure_analyzer"]
         drug_matcher = pipeline_components["drug_matcher"]
+        clinvar_annotator = pipeline_components["clinvar_annotator"]
+        common_risk_annotator = pipeline_components["diabetes_common_risk"]
 
         # ---- Step 1: parse VCF -------------------------------------------------
         _set(upload_id, progress=10.0, message="Parsing VCF and computing QC...")
         vcf_results = await vcf_parser.parse_vcf(file_path, sample_id)
         all_variants = vcf_results.get("variants", [])
         total_variants = len(all_variants)
+        vcf_metadata = dict(vcf_results.get("vcf_metadata", {}) or {})
+        carried_alleles, sample_selection = _extract_carried_alleles(vcf_results, sample_id)
+        detected_build = vcf_metadata.get("genome_build", "unknown")
+        if genome_build_override in {"GRCh37", "GRCh38"}:
+            genome_build = genome_build_override
+            vcf_metadata["genome_build"] = genome_build
+            vcf_metadata["genome_build_source"] = "user_override"
+            vcf_metadata["detected_genome_build"] = detected_build
+        else:
+            genome_build = detected_build
+            vcf_metadata["genome_build_source"] = "vcf_header" if genome_build != "unknown" else "unknown"
+        manhattan_data = _extract_manhattan_data(
+            vcf_results, carried_alleles, sample_selection,
+        )
 
-        # ---- Step 2: choose which variants to annotate ------------------------
+        # These local exact-allele layers evaluate every carried allele and are
+        # independent of the remote VEP cap. They make no per-patient requests.
+        if sample_selection.get("status") == "no_genotype_samples":
+            shared_skip = {
+                "status": "skipped_no_genotype_samples", "build": genome_build,
+                "evaluated_alleles": 0, "matched_records": 0, "findings": [],
+                "source": {}, "warnings": list(sample_selection.get("warnings", [])),
+            }
+            clinvar_result = {**shared_skip, "reportable_count": 0}
+            common_risk_result = {**shared_skip, "score_calculated": False}
+        else:
+            clinvar_result = clinvar_annotator.annotate(genome_build, carried_alleles)
+            common_risk_result = common_risk_annotator.annotate(genome_build, carried_alleles)
+
+        # ---- Step 2: choose which carried variants to annotate ----------------
+        vep_source = [{
+            "chrom": allele["chrom"], "pos": allele["pos"],
+            "id": allele.get("record_id"), "ref": allele["ref"],
+            "alt": allele["alt"], "filter": allele.get("filter"),
+        } for allele in carried_alleles]
+        if not vep_source and sample_selection.get("status") == "no_genotype_samples":
+            # Site-only VCF: VEP may still annotate records, but local carried-
+            # allele evidence remains explicitly not evaluated.
+            vep_source = all_variants
         pass_variants = [
-            v for v in all_variants
+            v for v in vep_source
             if str(v.get("filter", "")).upper() in ("PASS", ".", "", "NONE")
         ]
-        # If the "filter" field isn't a real PASS flag (older VCFs), fall back to all
-        candidates = pass_variants if pass_variants else all_variants
+        candidates = pass_variants if pass_variants else vep_source
         to_annotate = candidates[:MAX_VARIANTS_TO_VEP]
 
         _set(
@@ -366,17 +689,28 @@ async def analyze_file(upload_id: str, file_path: str, sample_id: str):
         # ---- Assemble results -------------------------------------------------
         results = {
             "sample_id": sample_id,
+            "analyzed_vcf_sample": sample_selection.get("selected_sample"),
+            "sample_selection": sample_selection,
+            "vcf_metadata": vcf_metadata,
+            "carried_allele_count": len(carried_alleles),
             "qc_summary": vcf_results.get("qc_summary", {}),
             "total_variants": total_variants,
             "variants_annotated": len(annotated),
-            "annotation_capped": total_variants > len(to_annotate),
+            "vep_candidate_count": len(candidates),
+            "annotation_capped": len(candidates) > len(to_annotate),
             "mutations": mutations,
             "mutation_type_counts": mutation_type_counts,
+            "manhattan_plot": manhattan_data,
             "coding_mutation_count": len(mutations),
             "genes_with_coding_variants": list(genes_seen.keys()),
             "structures": structures,
             "drug_results": drug_results,
             "diabetes_findings": diabetes_findings,
+            "clinvar_status": _evidence_status(clinvar_result),
+            "clinvar_findings": clinvar_result.get("findings", []),
+            "clinvar_evaluated": clinvar_result.get("status") == "complete",
+            "diabetes_common_risk_status": _evidence_status(common_risk_result),
+            "diabetes_common_risk_findings": common_risk_result.get("findings", []),
             "summary": {
                 "total_variants": total_variants,
                 "variants_annotated": len(annotated),
@@ -385,12 +719,15 @@ async def analyze_file(upload_id: str, file_path: str, sample_id: str):
                 "structures_resolved": len([s for s in structures if not s.get("error")]),
                 "drug_matches": sum(len(r.get("matched_drugs", [])) for r in drug_results),
                 "diabetes_genes_found": len(diabetes_findings),
+                "clinvar_matches": clinvar_result.get("matched_records", 0),
+                "common_risk_matches": common_risk_result.get("matched_records", 0),
+                "manhattan_points": manhattan_data.get("point_count", 0),
             },
         }
 
         msg = "Analysis completed successfully"
         if results["annotation_capped"]:
-            msg += (f" (annotated first {len(to_annotate)} of {total_variants} variants; "
+            msg += (f" (annotated first {len(to_annotate)} of {len(candidates)} carried/site alleles; "
                     f"raise MAX_VARIANTS_TO_VEP to annotate more)")
 
         _set(upload_id, status="completed", progress=100.0, message=msg, results=results)
@@ -541,10 +878,11 @@ INDEX_HTML = """
         .section-intro { margin: -12px 0 24px; color: var(--muted); font-size: .92rem; }
         .field { margin-bottom: 17px; }
         .field label { display: block; margin-bottom: 7px; color: #304765; font-size: .78rem; font-weight: 750; }
-        input[type=text], input[type=file] { width: 100%; min-height: 50px; padding: 12px 14px; color: var(--ink); border: 1px solid rgba(92,123,173,.24); border-radius: 13px; background: rgba(255,255,255,.78); box-shadow: inset 0 1px 2px rgba(20,45,80,.025); transition: border-color .2s, box-shadow .2s, background .2s; }
+        input[type=text], input[type=file], select { width: 100%; min-height: 50px; padding: 12px 14px; color: var(--ink); border: 1px solid rgba(92,123,173,.24); border-radius: 13px; background: rgba(255,255,255,.78); box-shadow: inset 0 1px 2px rgba(20,45,80,.025); transition: border-color .2s, box-shadow .2s, background .2s; }
+        select { cursor: pointer; }
         input[type=file] { padding: 8px; cursor: pointer; color: var(--muted); }
         input[type=file]::file-selector-button { height: 33px; margin-right: 12px; padding: 0 13px; border: 0; border-radius: 9px; color: #2454b6; background: #eaf1ff; font-weight: 750; cursor: pointer; }
-        input:focus { outline: 0; border-color: rgba(39,100,235,.7); background: white; box-shadow: 0 0 0 4px rgba(39,100,235,.1), 0 8px 24px rgba(39,100,235,.07); }
+        input:focus, select:focus { outline: 0; border-color: rgba(39,100,235,.7); background: white; box-shadow: 0 0 0 4px rgba(39,100,235,.1), 0 8px 24px rgba(39,100,235,.07); }
         .action-row { display: flex; flex-wrap: wrap; gap: 11px; margin-top: 20px; }
         button { position: relative; min-height: 45px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 10px 18px; overflow: hidden; border: 0; border-radius: 12px; color: white; background: linear-gradient(120deg, #2865e8, #4c87f1); box-shadow: 0 10px 24px rgba(39,100,235,.2); font-size: .84rem; font-weight: 760; cursor: pointer; transition: transform .18s ease, box-shadow .18s ease, filter .18s ease; }
         button::after { content: ""; position: absolute; inset: -80% -30%; background: linear-gradient(110deg, transparent 42%, rgba(255,255,255,.26), transparent 58%); transform: translateX(-80%); transition: transform .55s ease; }
@@ -587,9 +925,26 @@ INDEX_HTML = """
         tbody tr { background: rgba(255,255,255,.42); transition: background .18s ease; }
         tbody tr:nth-child(even) { background: rgba(243,247,253,.62); }
         tbody tr:hover { background: rgba(228,239,255,.72); }
-        .badge { display: inline-flex; align-items: center; padding: 4px 8px; border-radius: 999px; color: white; box-shadow: 0 4px 12px rgba(40,65,100,.11); font-size: .64rem; font-weight: 800; line-height: 1; letter-spacing: .02em; }
+        .badge { display: inline-flex; align-items: center; padding: 5px 9px; border: 1px solid rgba(30,64,175,.16); border-radius: 999px; color: #fff; background: linear-gradient(135deg, #2563eb, #4f46e5); box-shadow: 0 5px 14px rgba(37,99,235,.2); font-size: .64rem; font-weight: 850; line-height: 1; letter-spacing: .025em; }
+        .diabetes-badge { border-color: rgba(15,118,110,.2); color: #fff; background: linear-gradient(135deg, #0f766e, #0891b2); box-shadow: 0 5px 15px rgba(13,148,136,.24); text-transform: uppercase; }
+        .diabetes-category-badge { border-color: rgba(67,56,202,.18); color: #3730a3; background: linear-gradient(135deg, #eef2ff, #e0f2fe); box-shadow: 0 4px 12px rgba(79,70,229,.12); line-height: 1.25; }
+        .diabetes-section { overflow: hidden; border-color: rgba(13,148,136,.23); background: linear-gradient(145deg, rgba(240,253,250,.94), rgba(239,246,255,.82)); }
+        .diabetes-section::before { content: ""; position: absolute; width: 210px; height: 210px; right: -85px; top: -105px; border-radius: 50%; background: radial-gradient(circle, rgba(13,148,136,.14), transparent 68%); pointer-events: none; }
+        .diabetes-section h2::before { border-color: rgba(13,148,136,.2); background: #0f8f83; box-shadow: 0 0 0 5px rgba(13,148,136,.07); }
+        .evidence-layer { overflow: hidden; }
+        .evidence-layer.monogenic { border-color: rgba(79,70,229,.22); background: linear-gradient(145deg, rgba(245,243,255,.94), rgba(239,246,255,.82)); }
+        .evidence-layer.common-risk { border-color: rgba(217,119,6,.2); background: linear-gradient(145deg, rgba(255,251,235,.94), rgba(255,247,237,.82)); }
+        .evidence-head { display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+        .evidence-head h2 { margin-bottom: 12px; }
+        .evidence-status { display: inline-flex; align-items: center; padding: 7px 10px; border: 1px solid; border-radius: 9px; font-size: .7rem; font-weight: 800; }
+        .evidence-status.is-complete { color: #08786f; border-color: rgba(13,148,136,.25); background: #ecfdf5; }
+        .evidence-status.is-pending { color: #8a5b12; border-color: rgba(217,119,6,.25); background: #fffbeb; }
+        .evidence-status.is-error { color: #a42637; border-color: rgba(220,38,38,.22); background: #fff1f2; }
+        .evidence-summary { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 18px; }
+        .evidence-summary span { padding: 6px 9px; border: 1px solid rgba(83,119,177,.14); border-radius: 8px; color: #4b607a; background: rgba(255,255,255,.72); font-size: .7rem; font-weight: 700; }
+        .evidence-warning { margin: 10px 0; padding: 11px 13px; border-left: 4px solid #d69b28; border-radius: 8px; color: #76551e; background: rgba(255,249,231,.82); font-size: .78rem; }
         .section-description { margin: -11px 0 22px; color: var(--muted) !important; font-size: .82rem !important; }
-        .finding-card { margin-bottom: 12px; padding: 17px 18px; border: 1px solid rgba(88,120,171,.14); border-radius: 14px; background: rgba(249,251,255,.7); transition: transform .2s, border-color .2s, box-shadow .2s; }
+        .finding-card { margin-bottom: 12px; padding: 17px 18px; border: 1px solid rgba(13,148,136,.17); border-left: 4px solid #14a399; border-radius: 14px; background: linear-gradient(135deg, rgba(255,255,255,.88), rgba(240,253,250,.7)); transition: transform .2s, border-color .2s, box-shadow .2s; }
         .finding-card:hover { transform: translateX(3px); border-color: rgba(39,100,235,.24); box-shadow: 0 10px 24px rgba(46,78,128,.07); }
         .finding-card h3 { margin: 0 0 10px !important; display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
         .finding-meta { margin: 6px 0 !important; color: #465d78; font-size: .8rem !important; }
@@ -632,6 +987,27 @@ INDEX_HTML = """
         .viewer-control:hover { color: #173d72; background: #e1ecfc; box-shadow: none; transform: none; }
         .alphafold-secondary-link { font-size: .73rem; }
         .mutation-chart-host { min-height: 320px; }
+        .manhattan-host { position: relative; min-height: 440px; }
+        .manhattan-shell { position: relative; width: 100%; min-height: 420px; padding: 10px 10px 4px; border: 1px solid rgba(84,117,169,.14); border-radius: 15px; background: linear-gradient(180deg, rgba(255,255,255,.9), rgba(242,247,254,.7)); }
+        .manhattan-canvas { width: 100%; height: 400px; display: block; touch-action: none; }
+        .manhattan-tooltip { position: absolute; z-index: 5; max-width: 280px; padding: 9px 11px; border: 1px solid rgba(255,255,255,.14); border-radius: 10px; color: #fff; background: rgba(16,33,59,.95); box-shadow: 0 12px 30px rgba(15,31,55,.22); font-size: .72rem; line-height: 1.45; pointer-events: none; opacity: 0; transform: translateY(3px); transition: opacity .12s, transform .12s; }
+        .manhattan-tooltip.visible { opacity: 1; transform: translateY(0); }
+        .manhattan-tooltip strong { display: block; margin-bottom: 2px; }
+        .manhattan-meta { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 0; }
+        .manhattan-meta span { padding: 6px 9px; border: 1px solid rgba(83,119,177,.14); border-radius: 8px; color: #4b607a; background: rgba(255,255,255,.72); font-size: .69rem; font-weight: 700; }
+        .manhattan-empty { margin: 0; padding: 20px; border: 1px dashed rgba(83,119,177,.24); border-radius: 12px; color: var(--muted); background: rgba(248,250,253,.72); }
+        .gwas-card { border-color: rgba(79,70,229,.2); background: linear-gradient(145deg, rgba(245,243,255,.9), rgba(239,246,255,.8)); }
+        .gwas-head { margin-bottom: 4px; }
+        .gwas-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 8px 20px; }
+        .gwas-status { margin: 14px 0 0; padding: 12px 14px; border-radius: 11px; font-size: .82rem; font-weight: 650; }
+        .gwas-status.is-running { color: #3730a3; border: 1px solid rgba(79,70,229,.22); background: rgba(238,242,255,.8); }
+        .gwas-status.is-error { color: #a42637; border: 1px solid rgba(220,38,38,.22); background: #fff1f2; }
+        .gwas-summary { margin: 18px 0 6px; }
+        .gwas-summary h3 { margin: 0 0 10px; color: #18355e; }
+        .gwas-modes { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin: 4px 0 18px; }
+        .gwas-mode { padding: 13px 15px; border: 1px solid rgba(79,70,229,.18); border-radius: 12px; background: rgba(255,255,255,.6); }
+        .gwas-mode strong { display: block; margin-bottom: 4px; color: #312e81; font-size: .84rem; }
+        .gwas-mode span { color: var(--muted); font-size: .78rem; line-height: 1.45; }
         .mutation-chart-layout { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(280px, 1.25fr); gap: 34px; align-items: center; }
         .mutation-legend { display: flex; flex-direction: column; gap: 7px; }
         .mutation-legend-item { width: 100%; min-height: 44px; display: grid; grid-template-columns: 14px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 9px 11px; border: 1px solid transparent; border-radius: 11px; color: var(--ink); background: transparent; box-shadow: none; text-align: left; }
@@ -720,6 +1096,7 @@ INDEX_HTML = """
             <p class="section-intro">Submit a VCF dataset or launch the validated demonstration workflow.</p>
             <form id="uploadForm">
                 <div class="field"><label for="sampleId">Sample identifier</label><input type="text" id="sampleId" placeholder="e.g. SAMPLE_001" autocomplete="off" required></div>
+                <div class="field"><label for="genomeBuild">Reference genome build</label><select id="genomeBuild"><option value="auto">Detect from VCF header</option><option value="GRCh38">GRCh38 / hg38</option><option value="GRCh37">GRCh37 / hg19</option></select><p class="example-help">Select a build only when you know how the VCF coordinates were generated. Build-specific evidence is not guessed.</p></div>
                 <div class="field"><label for="vcfFile">Variant Call Format file</label><input type="file" id="vcfFile" accept=".vcf,.vcf.gz" required></div>
                 <div class="action-row">
                     <button type="submit" id="submitBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 16V4M7 9l5-5 5 5M5 20h14"/></svg> Upload and Analyze</button>
@@ -738,6 +1115,32 @@ INDEX_HTML = """
             </ul>
             <div class="note">Large datasets are annotated to the configured VEP cap to maintain reliable API throughput.</div>
         </aside>
+    </section>
+
+    <section class="card gwas-card" aria-labelledby="gwasHeading">
+        <div class="gwas-head">
+            <p class="section-kicker">Genome-wide association</p>
+            <h2 id="gwasHeading">True Manhattan plot from a GWAS</h2>
+        </div>
+        <p class="section-intro">A single genome has no association p-values. Upload a <strong>multi-sample</strong> VCF (many individuals). Two modes are available.</p>
+        <div class="gwas-modes">
+            <div class="gwas-mode"><strong>With a phenotype table</strong><span>Genuine trait association (linear/logistic regression). Peaks reflect real trait significance against the 5×10⁻⁸ line.</span></div>
+            <div class="gwas-mode"><strong>VCF only (no phenotype)</strong><span>Hardy-Weinberg equilibrium test from genotype counts alone. This is genotyping/population QC, <em>not</em> disease significance.</span></div>
+        </div>
+        <form id="gwasForm">
+            <div class="gwas-grid">
+                <div class="field"><label for="gwasVcf">Multi-sample VCF (genotypes)</label><input type="file" id="gwasVcf" accept=".vcf,.vcf.gz" required></div>
+                <div class="field"><label for="gwasPheno">Phenotype table (CSV/TSV) &mdash; optional</label><input type="file" id="gwasPheno" accept=".csv,.tsv,.txt"></div>
+                <div class="field"><label for="gwasBuild">Reference genome build</label><select id="gwasBuild"><option value="auto">Detect from VCF header</option><option value="GRCh38">GRCh38 / hg38</option><option value="GRCh37">GRCh37 / hg19</option></select></div>
+                <div class="field"><label for="gwasPhenoCol">Phenotype column (optional)</label><input type="text" id="gwasPhenoCol" placeholder="auto-detect e.g. phenotype" autocomplete="off"></div>
+            </div>
+            <div class="action-row">
+                <button type="submit" id="gwasBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20V6M10 20V10M16 20V4M22 20H2"/></svg> Compute &amp; plot Manhattan</button>
+            </div>
+            <p class="example-help">If you provide a phenotype file: first column = sample IDs matching the VCF; a column named <code>phenotype</code>/<code>trait</code> (or the second column) = the trait; extra numeric columns are covariates. If you leave it empty, a Hardy-Weinberg Manhattan plot is computed from the VCF alone. Both modes require many samples in one multi-sample VCF.</p>
+        </form>
+        <div id="gwasStatusMsg" class="gwas-status" style="display:none;"></div>
+        <div id="gwasResult" aria-live="polite"></div>
     </section>
 
     <section class="card" id="progressCard" style="display:none;" aria-live="polite">
@@ -805,6 +1208,7 @@ document.getElementById('uploadForm').addEventListener('submit', async (e) => {
     const fd = new FormData();
     fd.append('file', file);
     fd.append('sample_id', sampleId);
+    fd.append('genome_build', document.getElementById('genomeBuild').value);
 
     setAnalysisControlsDisabled(true);
     document.getElementById('progressCard').style.display = 'block';
@@ -838,6 +1242,93 @@ document.getElementById('exampleBtn').addEventListener('click', async () => {
         setAnalysisControlsDisabled(false);
     }
 });
+
+document.getElementById('gwasForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const vcf = document.getElementById('gwasVcf').files[0];
+    const pheno = document.getElementById('gwasPheno').files[0];
+    if (!vcf) return;
+
+    const btn = document.getElementById('gwasBtn');
+    const statusMsg = document.getElementById('gwasStatusMsg');
+    const resultArea = document.getElementById('gwasResult');
+    btn.disabled = true;
+    resultArea.innerHTML = '';
+    statusMsg.style.display = 'block';
+    statusMsg.className = 'gwas-status is-running';
+    statusMsg.textContent = pheno
+        ? 'Computing per-variant trait association. This can take a moment for large VCFs...'
+        : 'No phenotype supplied. Computing a Hardy-Weinberg (genotype-only) Manhattan plot...';
+
+    const fd = new FormData();
+    fd.append('vcf_file', vcf);
+    if (pheno) fd.append('phenotype_file', pheno);
+    fd.append('genome_build', document.getElementById('gwasBuild').value);
+    fd.append('phenotype_column', document.getElementById('gwasPhenoCol').value.trim());
+
+    try {
+        const res = await fetch('/api/gwas', { method: 'POST', body: fd });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'GWAS failed');
+        renderGwasResult(data);
+        statusMsg.style.display = 'none';
+    } catch (err) {
+        statusMsg.className = 'gwas-status is-error';
+        statusMsg.textContent = 'Error: ' + err.message;
+    } finally {
+        btn.disabled = false;
+    }
+});
+
+function renderGwasResult(data) {
+    const plot = data.manhattan_plot || {};
+    const resultArea = document.getElementById('gwasResult');
+    const isHwe = data.mode === 'hwe';
+    const model = escapeHtml(plot.model || 'regression');
+    const lambda = (plot.lambda_gc == null) ? 'n/a' : Number(plot.lambda_gc).toFixed(3);
+    const heading = isHwe ? 'Hardy-Weinberg (genotype-only) summary' : 'Trait association summary';
+    let html = '<div class="gwas-summary"><h3>' + heading + '</h3>';
+    if (isHwe) {
+        html += '<div class="evidence-warning">This plot is computed from genotypes alone (no phenotype). ' +
+            'It is a Hardy-Weinberg equilibrium test used for genotyping and population-structure QC. ' +
+            'Peaks indicate possible genotyping error, batch effects, or population structure &mdash; ' +
+            'they are <strong>not</strong> trait or disease significance.</div>';
+    }
+    html += '<div class="evidence-summary">' +
+        '<span>Model: ' + model + '</span>';
+    if (!isHwe) {
+        html += '<span>Trait: ' + escapeHtml(plot.trait_type || '-') + ' (' + escapeHtml(plot.phenotype_column || '-') + ')</span>';
+    }
+    html += '<span>Samples analyzed: ' + Number(plot.samples_analyzed || 0).toLocaleString() + '</span>' +
+        '<span>Variants tested: ' + Number(plot.variants_tested || 0).toLocaleString() + '</span>' +
+        '<span>' + (isHwe ? 'HWE ' : '') + 'genome-wide (p&le;5e-8): ' + Number(plot.genome_wide_hits || 0) + '</span>' +
+        '<span>Suggestive (p&le;1e-5): ' + Number(plot.suggestive_hits || 0) + '</span>';
+    if (!isHwe) {
+        html += '<span>&lambda;GC: ' + lambda + '</span>';
+    }
+    if ((plot.covariate_names || []).length) {
+        html += '<span>Covariates: ' + escapeHtml(plot.covariate_names.join(', ')) + '</span>';
+    }
+    html += '<span>Skipped (QC): ' + Number(plot.skipped_qc || 0).toLocaleString() + '</span></div>';
+    if (!isHwe && lambda !== 'n/a' && Number(plot.lambda_gc) > 1.15) {
+        html += '<div class="evidence-warning">Genomic inflation &lambda;GC = ' + lambda +
+            ' is elevated, which can indicate population stratification or relatedness. ' +
+            'Interpret peaks cautiously and consider principal-component covariates.</div>';
+    }
+    html += '</div>';
+    const plotLabel = isHwe ? 'Hardy-Weinberg equilibrium Manhattan plot' : 'Genome-wide association Manhattan plot';
+    html += '<div id="gwasManhattan" class="manhattan-host" aria-label="' + plotLabel + '"></div>';
+    resultArea.innerHTML = html;
+
+    if (plot.status === 'available') {
+        renderManhattanPlot(plot, data.genome_build || 'unknown', 'gwasManhattan');
+    } else {
+        const empty = document.createElement('p');
+        empty.className = 'manhattan-empty';
+        empty.textContent = plot.message || 'No variants passed association testing.';
+        document.getElementById('gwasManhattan').appendChild(empty);
+    }
+}
 
 function setProgress(pct, msg) {
     const fill = document.getElementById('barFill');
@@ -874,6 +1365,34 @@ function pollStatus(id) {
     }, 1500);
 }
 
+function escapeHtml(value) {
+    return String(value == null ? '' : value).replace(/[&<>"']/g, function(char) {
+        return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char];
+    });
+}
+
+function safeExternalUrl(value, fallback) {
+    try {
+        const parsed = new URL(value || fallback, window.location.origin);
+        return ['http:', 'https:'].includes(parsed.protocol) ? escapeHtml(parsed.href) : '#';
+    } catch (error) {
+        return '#';
+    }
+}
+
+function evidenceStatusLabel(status) {
+    const labels = {
+        complete: 'Evaluation complete', disabled: 'Disabled', missing_index: 'Not evaluated — index missing',
+        "missing_catalog": "Not evaluated — catalog missing", "skipped_unknown_build": "Not evaluated — unknown build",
+        skipped_no_genotype_samples: 'Not evaluated — no genotype samples', error: 'Evaluation error'
+    };
+    return labels[status] || escapeHtml(status || 'Not evaluated');
+}
+
+function evidenceStatusClass(status) {
+    return status === 'complete' ? 'is-complete' : (status === 'error' ? 'is-error' : 'is-pending');
+}
+
 function renderResults(r) {
     if (!r) return;
     const s = r.summary || {};
@@ -886,11 +1405,22 @@ function renderResults(r) {
     html += metric(s.drug_matches, 'Drug Matches');
     html += '</div>';
     if (r.annotation_capped) {
-        html += '<div class="note">Only the first ' + r.variants_annotated +
-                ' of ' + r.total_variants + ' variants were annotated (cap). ' +
-                'Increase MAX_VARIANTS_TO_VEP to process more.</div>';
+        html += '<div class="note">Only the first ' + Number(r.variants_annotated || 0) +
+                ' of ' + Number(r.vep_candidate_count || 0) + ' carried/site alleles were sent to VEP. ' +
+                'This cap affects coding, structure, drug, and coding-gene context only; local ClinVar/common-risk evaluation is cap-independent.</div>';
     }
+    var sampleWarnings = ((r.sample_selection || {}).warnings || []);
+    sampleWarnings.forEach(function(warning) {
+        html += '<div class="evidence-warning">' + escapeHtml(warning) + '</div>';
+    });
     html += '</div>';
+
+    // True association statistics when supplied; otherwise an honest chromosome distribution.
+    html += '<div class="card"><div class="evidence-head"><h2 id="associationPlotTitle">Association Manhattan Plot</h2>' +
+            '<span id="associationPlotStatus" class="evidence-status is-pending">Checking VCF statistics</span></div>' +
+            '<p id="associationPlotDescription" class="section-description">Plots valid VCF association p-values as −log10(p) across chromosomes. ' +
+            'When p-values are absent, this section shows sample variants per chromosome instead of inventing significance.</p>' +
+            '<div id="manhattanPlot" class="manhattan-host" aria-label="Genome-wide variant visualization"></div></div>';
 
     // Interactive mutation-type donut chart (rendered after the HTML is inserted).
     html += '<div class="card"><h2>Mutation Types</h2>' +
@@ -910,41 +1440,108 @@ function renderResults(r) {
                 '<th>Consequence</th><th>Amino Acid (HGVSp)</th></tr>';
         r.mutations.slice(0, 200).forEach(m => {
             var isDiab = (r.diabetes_findings || []).some(function(f){return f.gene_symbol === m.gene_symbol;});
-            var geneCell = (m.gene_symbol || '-') + (isDiab ? ' <span class="badge">diabetes</span>' : '');
-            html += '<tr><td>' + m.position + '</td><td>' + m.ref + '&rarr;' + m.alt + '</td>' +
+            var geneCell = escapeHtml(m.gene_symbol || '-') + (isDiab ? ' <span class="badge diabetes-badge" style="color:#fff;background:linear-gradient(135deg,#0f766e,#0891b2);border-color:rgba(15,118,110,.2);">Diabetes</span>' : '');
+            html += '<tr><td>' + escapeHtml(m.position) + '</td><td>' + escapeHtml(m.ref) + '&rarr;' + escapeHtml(m.alt) + '</td>' +
                     '<td>' + geneCell + '</td>' +
-                    '<td>' + (m.consequence_terms || []).join(', ') + '</td>' +
-                    '<td>' + (m.hgvsp || m.amino_acid_change || '-') + '</td></tr>';
+                    '<td>' + escapeHtml((m.consequence_terms || []).join(', ')) + '</td>' +
+                    '<td>' + escapeHtml(m.hgvsp || m.amino_acid_change || '-') + '</td></tr>';
         });
         html += '</table>';
         if (r.mutations.length > 200) html += '<p>Showing first 200 of ' + r.mutations.length + '.</p>';
     }
     html += '</div>';
 
-    // Diabetes interpretation
-    html += '<div class="card"><h2>Diabetes-Associated Findings</h2>';
-    html += '<p class="section-description">Interpretation from curated diabetes gene knowledge ' +
-            '(OMIM, PharmGKB, GWAS Catalog). For research/education only, not diagnostic. ' +
-            'Use the links to confirm each finding.</p>';
+    // Local ClinVar / monogenic evidence (all carried alleles; independent of VEP cap)
+    var cvStatus = r.clinvar_status || {};
+    var cvFindings = r.clinvar_findings || [];
+    var cvSource = cvStatus.source || {};
+    html += '<div class="card evidence-layer monogenic"><div class="evidence-head">' +
+            '<h2>ClinVar / Monogenic Diabetes</h2><span class="evidence-status ' +
+            evidenceStatusClass(cvStatus.status) + '">' + evidenceStatusLabel(cvStatus.status) + '</span></div>';
+    html += '<p class="section-description">Local, build-specific exact-allele matching. Patient coordinates are not sent to ClinVar. ' +
+            'Conflicting and uncertain assertions are not presented as causal.</p>';
+    html += '<div class="evidence-summary"><span>Build: ' + escapeHtml(cvStatus.build || 'unknown') + '</span>' +
+            '<span>Inspected: ' + Number(cvStatus.inspected_alleles || r.carried_allele_count || 0) + '</span>' +
+            '<span>Evaluated: ' + Number(cvStatus.evaluated_alleles || 0) + '</span>' +
+            '<span>Matched: ' + Number(cvStatus.matched_records || 0) + '</span>' +
+            '<span>Release: ' + escapeHtml(cvSource.release || 'not installed') + '</span></div>';
+    (cvStatus.warnings || []).forEach(function(warning) {
+        html += '<div class="evidence-warning">' + escapeHtml(warning) + '</div>';
+    });
+    if (cvStatus.status === 'complete' && cvFindings.length === 0) {
+        html += '<p>No reportable diabetes-associated variants were identified among the evaluated loci. ' +
+                'This does not exclude diabetes or genetic susceptibility.</p>';
+    } else {
+        cvFindings.forEach(function(f) {
+            var significance = escapeHtml(f.significance || 'Unspecified');
+            html += '<div class="finding-card"><h3>' + escapeHtml(f.gene || 'ClinVar record') +
+                    ' <span class="badge diabetes-category-badge">' + significance + '</span></h3>' +
+                    '<p class="finding-meta"><b>Allele:</b> ' + escapeHtml(f.build) + ' ' +
+                    escapeHtml(f.chrom) + ':' + escapeHtml(f.pos) + ' ' + escapeHtml(f.ref) + '&gt;' + escapeHtml(f.alt) +
+                    ' &middot; GT ' + escapeHtml(f.genotype || '-') + '</p>' +
+                    '<p class="finding-meta"><b>Condition:</b> ' + escapeHtml(f.conditions || '-') + '</p>' +
+                    '<p class="finding-meta"><b>Review:</b> ' + escapeHtml(f.review_status || '-') +
+                    ' &middot; ' + escapeHtml(f.conflict_state || '-') + '</p>' +
+                    '<p class="evidence-links"><a href="' + safeExternalUrl(f.url, 'https://www.ncbi.nlm.nih.gov/clinvar/') +
+                    '" target="_blank" rel="noopener noreferrer">Open ClinVar record &#8599;</a></p></div>';
+        });
+    }
+    html += '</div>';
+
+    // Local common-risk evidence; never converted into a polygenic risk score.
+    var riskStatus = r.diabetes_common_risk_status || {};
+    var riskFindings = r.diabetes_common_risk_findings || [];
+    var riskSource = riskStatus.source || {};
+    html += '<div class="card evidence-layer common-risk"><div class="evidence-head">' +
+            '<h2>Common Diabetes Risk Evidence</h2><span class="evidence-status ' +
+            evidenceStatusClass(riskStatus.status) + '">' + evidenceStatusLabel(riskStatus.status) + '</span></div>';
+    html += '<p class="section-description">Exact matching against a versioned local association catalog. ' +
+            'No polygenic risk score or diagnosis is calculated.</p>';
+    html += '<div class="evidence-summary"><span>Build: ' + escapeHtml(riskStatus.build || 'unknown') + '</span>' +
+            '<span>Inspected: ' + Number(riskStatus.inspected_alleles || r.carried_allele_count || 0) + '</span>' +
+            '<span>Evaluated: ' + Number(riskStatus.evaluated_alleles || 0) + '</span>' +
+            '<span>Matched: ' + Number(riskStatus.matched_records || 0) + '</span>' +
+            '<span>Dataset: ' + escapeHtml(riskSource.version || riskSource.release || 'not installed') + '</span></div>';
+    (riskStatus.warnings || []).forEach(function(warning) {
+        html += '<div class="evidence-warning">' + escapeHtml(warning) + '</div>';
+    });
+    if (riskStatus.status === 'complete' && riskFindings.length === 0) {
+        html += '<p>No catalogued common-risk alleles were identified among the evaluated loci. ' +
+                'This does not exclude diabetes or genetic susceptibility.</p>';
+    } else {
+        riskFindings.forEach(function(f) {
+            html += '<div class="finding-card"><h3>' + escapeHtml(f.gene || f.rsid || 'Association record') +
+                    ' <span class="badge diabetes-category-badge">' + escapeHtml(f.trait || 'Diabetes association') + '</span></h3>' +
+                    '<p class="finding-meta"><b>Effect/risk allele:</b> ' + escapeHtml(f.effect_allele || f.risk_allele || f.alt || '-') +
+                    ' &middot; GT ' + escapeHtml(f.genotype || '-') + '</p>' +
+                    '<p class="finding-meta"><b>Effect:</b> ' + escapeHtml(f.effect_size || f.odds_ratio || '-') +
+                    ' &middot; <b>Ancestry:</b> ' + escapeHtml(f.ancestry || '-') + '</p>' +
+                    '<p class="finding-meta"><b>Study/source:</b> ' + escapeHtml(f.study || f.source || '-') + '</p></div>';
+        });
+    }
+    html += '</div>';
+
+    // Legacy VEP-capped coding-gene context, deliberately separate from variant-level evidence.
+    html += '<div class="card diabetes-section"><h2>Coding Gene Context for Diabetes</h2>';
+    html += '<p class="section-description">Gene-level educational context for coding mutations found by VEP. ' +
+            'This section is affected by the VEP cap and is not ClinVar classification or a diagnosis.</p>';
     var df = r.diabetes_findings || [];
     if (df.length === 0) {
-        html += '<p>No mutations in known diabetes-associated genes were found in the annotated set.</p>';
+        html += '<p>No coding mutations in the curated diabetes gene list were found in the VEP-evaluated set.</p>';
     } else {
         df.forEach(function(f){
-            html += '<div class="finding-card">';
-            html += '<h3>' + f.gene_symbol +
-                    ' <span class="badge">' + f.category + '</span></h3>';
-            html += '<p class="finding-meta"><b>Variant:</b> ' + f.position + ' ' + f.change +
-                    ' | ' + (f.consequence_terms||[]).join(', ') +
-                    (f.amino_acid_change ? ' | ' + f.amino_acid_change : '') + '</p>';
-            html += '<p class="finding-meta"><b>Gene role:</b> ' + f.role + '</p>';
-            html += '<p class="finding-meta"><b>Diabetes significance:</b> ' + f.significance + '</p>';
-            html += '<p class="finding-meta"><b>Treatment relevance:</b> ' + f.treatment + '</p>';
-            html += '<p class="evidence-links">Confirm on: ' +
-                    '<a href="' + f.pharmgkb_url + '" target="_blank" rel="noopener noreferrer">PharmGKB</a> &middot; ' +
-                    '<a href="' + f.omim_url + '" target="_blank" rel="noopener noreferrer">OMIM</a> &middot; ' +
-                    '<a href="' + f.gwas_url + '" target="_blank" rel="noopener noreferrer">GWAS Catalog</a></p>';
-            html += '</div>';
+            html += '<div class="finding-card"><h3>' + escapeHtml(f.gene_symbol) +
+                    ' <span class="badge diabetes-category-badge">' + escapeHtml(f.category) + '</span></h3>' +
+                    '<p class="finding-meta"><b>Variant:</b> ' + escapeHtml(f.position) + ' ' + escapeHtml(f.change) +
+                    ' &middot; ' + escapeHtml((f.consequence_terms || []).join(', ')) +
+                    (f.amino_acid_change ? ' &middot; ' + escapeHtml(f.amino_acid_change) : '') + '</p>' +
+                    '<p class="finding-meta"><b>Gene role:</b> ' + escapeHtml(f.role) + '</p>' +
+                    '<p class="finding-meta"><b>Diabetes context:</b> ' + escapeHtml(f.significance) + '</p>' +
+                    '<p class="finding-meta"><b>Treatment context:</b> ' + escapeHtml(f.treatment) + '</p>' +
+                    '<p class="evidence-links">Confirm on: <a href="' + safeExternalUrl(f.pharmgkb_url, '#') +
+                    '" target="_blank" rel="noopener noreferrer">PharmGKB</a> &middot; <a href="' +
+                    safeExternalUrl(f.omim_url, '#') + '" target="_blank" rel="noopener noreferrer">OMIM</a> &middot; <a href="' +
+                    safeExternalUrl(f.gwas_url, '#') + '" target="_blank" rel="noopener noreferrer">GWAS Catalog</a></p></div>';
         });
     }
     html += '</div>';
@@ -977,10 +1574,10 @@ function renderResults(r) {
 
     // Drugs
     html += '<div class="card"><h2>Drug Interactions</h2>';
-    html += '<p class="section-description">Evidence comes from PharmGKB clinical annotations. ' +
-            'Open the exact annotation to confirm each gene\\u2013drug association. ' +
+    html += '<p class="section-description">Evidence comes from ClinPGx/PharmGKB clinical annotations. ' +
+            'Open the exact annotation to confirm each gene–drug association. ' +
             'Levels 1A/1B are strongest, 2A/2B moderate, and 3/4 lower. ' +
-            '<i>no_pgx_evidence</i> indicates no PharmGKB clinical annotation was found for that pair.</p>';
+            'A successful empty lookup is different from temporary evidence-service unavailability.</p>';
     if ((r.drug_results || []).length === 0) {
         html += '<p>No drug interactions found.</p>';
     } else {
@@ -1000,12 +1597,30 @@ function renderResults(r) {
                 var db = 'https://go.drugbank.com/unearth/q?searcher=drugs&query=' + encodeURIComponent(name);
                 var links = '<a href="' + pgkb + '" target="_blank">PharmGKB</a> | ' +
                             '<a href="' + db + '" target="_blank">DrugBank</a>';
-                // Colour-code the evidence level
+                // Render the PharmGKB level as a compact ClinPGx-style badge.
+                // The complete source value remains available to assistive tech and on hover.
                 var ev = d.evidence_level || 'no_pgx_evidence';
-                var evColor = ev.indexOf('1') > -1 ? '#059669' :
-                              ev.indexOf('2') > -1 ? '#2563eb' :
-                              ev.indexOf('3') > -1 || ev.indexOf('4') > -1 ? '#d97706' : '#6b7280';
-                var evCell = '<span style="color:' + evColor + ';font-weight:600;">' + ev + '</span>';
+                var levelMatch = ev.match(/Level\\s+([1-4])([AB])?/i);
+                var evCell;
+                if (levelMatch) {
+                    var level = levelMatch[1];
+                    var sublevel = (levelMatch[2] || '').toUpperCase();
+                    var palette = {
+                        '1': { bg: '#08b86c', shadow: 'rgba(8,184,108,.24)' },
+                        '2': { bg: '#2879dc', shadow: 'rgba(40,121,220,.24)' },
+                        '3': { bg: '#f4b916', shadow: 'rgba(244,185,22,.25)' },
+                        '4': { bg: '#c93838', shadow: 'rgba(201,56,56,.23)' }
+                    }[level];
+                    var sublevelHtml = sublevel
+                        ? '<span style="display:grid;place-items:center;align-self:stretch;min-width:24px;padding:0 6px;border-left:1px solid rgba(255,255,255,.45);font-size:.72rem;font-weight:900;">' + sublevel + '</span>'
+                        : '';
+                    evCell = '<span title="' + ev + '" aria-label="' + ev + '" style="display:inline-flex;align-items:center;overflow:hidden;border-radius:7px;background:' + palette.bg + ';color:#fff;box-shadow:0 5px 14px ' + palette.shadow + ';line-height:1;white-space:nowrap;">' +
+                             '<span style="padding:8px 10px;font-size:.75rem;font-weight:800;letter-spacing:.01em;">Level ' + level + '</span>' + sublevelHtml + '</span>';
+                } else if (ev === 'evidence_unavailable') {
+                    evCell = '<span title="ClinPGx evidence service was unavailable" style="display:inline-flex;padding:7px 10px;border:1px solid rgba(217,119,6,.3);border-radius:7px;background:#fffbeb;color:#92400e;font-size:.72rem;font-weight:800;white-space:nowrap;">Evidence unavailable</span>';
+                } else {
+                    evCell = '<span title="No ClinPGx clinical annotation found in a successful lookup" style="display:inline-flex;padding:7px 10px;border:1px solid rgba(100,116,139,.24);border-radius:7px;background:#f1f5f9;color:#475569;font-size:.72rem;font-weight:750;white-space:nowrap;">No PGx evidence</span>';
+                }
                 html += '<tr><td>' + name + '</td><td>' + (d.action||'-') +
                         '</td><td>' + evCell + '</td><td>' + links + '</td></tr>';
             });
@@ -1024,7 +1639,376 @@ function renderResults(r) {
             openStructureViewer((r.structures || [])[Number(control.dataset.structureIndex)], control);
         });
     });
+    renderManhattanPlot(r.manhattan_plot || {}, (r.vcf_metadata || {}).genome_build || 'unknown');
     renderMutationDonut(r.mutation_type_counts || {});
+}
+
+function renderManhattanPlot(rawData, genomeBuild, hostId) {
+    const host = document.getElementById(hostId || 'manhattanPlot');
+    if (!host) return;
+    host.replaceChildren();
+    const points = (rawData.points || []).map(function(point) {
+        return {
+            chrom: String(point.chrom || '').replace(/^chr/i, ''),
+            pos: Number(point.pos), id: point.id || null,
+            ref: point.ref || '', alt: point.alt || '',
+            p: Number(point.p_value), score: Number(point.minus_log10_p)
+        };
+    }).filter(function(point) {
+        return point.chrom && Number.isFinite(point.pos) && point.pos > 0 &&
+               Number.isFinite(point.p) && point.p > 0 && point.p <= 1 &&
+               Number.isFinite(point.score) && point.score >= 0;
+    });
+
+    const status = document.getElementById('associationPlotStatus');
+    const title = document.getElementById('associationPlotTitle');
+    const description = document.getElementById('associationPlotDescription');
+    if (rawData.status !== 'available' || points.length === 0) {
+        if (title) title.textContent = 'Variant Distribution by Chromosome';
+        if (description) description.textContent =
+            'This VCF does not supply association p-values, so variant counts are shown by chromosome. ' +
+            'This is a sample distribution view, not a Manhattan significance plot or diagnostic result.';
+        if (status) {
+            status.className = 'evidence-status is-complete';
+            status.textContent = 'Distribution available';
+        }
+        renderChromosomeDistribution(host, rawData);
+        return;
+    }
+    if (status) {
+        status.className = 'evidence-status is-complete';
+        status.textContent = 'Association statistics available';
+    }
+
+    host.style.minHeight = '';
+    const shell = document.createElement('div');
+    shell.className = 'manhattan-shell';
+    const canvas = document.createElement('canvas');
+    canvas.className = 'manhattan-canvas';
+    canvas.setAttribute('role', 'img');
+    canvas.setAttribute('aria-label', 'Manhattan plot with ' + points.length + ' association p-value points');
+    const tooltip = document.createElement('div');
+    tooltip.className = 'manhattan-tooltip';
+    tooltip.setAttribute('role', 'tooltip');
+    shell.append(canvas, tooltip);
+    host.appendChild(shell);
+
+    const meta = document.createElement('div');
+    meta.className = 'manhattan-meta';
+    const details = [
+        'Build: ' + (genomeBuild || 'unknown'),
+        'Scope: ' + (rawData.scope === 'all_site_alleles' ? 'all site alleles' : 'carried alleles'),
+        'Points: ' + Number(rawData.point_count || points.length).toLocaleString(),
+        'INFO field: ' + ((rawData.p_value_fields || []).join(', ') || 'unknown')
+    ];
+    if (rawData.downsampled) {
+        details.push('Displayed ' + Number(rawData.point_count).toLocaleString() + ' of ' +
+            Number(rawData.original_point_count).toLocaleString() + ' points');
+    }
+    details.forEach(function(text) {
+        const item = document.createElement('span');
+        item.textContent = text;
+        meta.appendChild(item);
+    });
+    host.appendChild(meta);
+
+    const canonical = [];
+    for (let i = 1; i <= 22; i += 1) canonical.push(String(i));
+    canonical.push('X', 'Y', 'MT');
+    function chromosomeRank(chrom) {
+        const normalized = chrom === 'M' ? 'MT' : chrom.toUpperCase();
+        const index = canonical.indexOf(normalized);
+        return index >= 0 ? index : canonical.length + normalized.charCodeAt(0);
+    }
+    points.sort(function(a, b) {
+        return chromosomeRank(a.chrom) - chromosomeRank(b.chrom) || a.pos - b.pos;
+    });
+
+    const grch38 = [248956422,242193529,198295559,190214555,181538259,170805979,159345973,145138636,138394717,133797422,135086622,133275309,114364328,107043718,101991189,90338345,83257441,80373285,58617616,64444167,46709983,50818468,156040895,57227415,16569];
+    const grch37 = [249250621,243199373,198022430,191154276,180915260,171115067,159138663,146364022,141213431,135534747,135006516,133851895,115169878,107349540,102531392,90354753,81195210,78077248,59128983,63025520,48129895,51304566,155270560,59373566,16571];
+    const selectedLengths = String(genomeBuild).toLowerCase() === 'grch37' ? grch37 :
+        (String(genomeBuild).toLowerCase() === 'grch38' ? grch38 : null);
+    const lengthMap = {};
+    canonical.forEach(function(chrom, index) {
+        if (selectedLengths) lengthMap[chrom] = selectedLengths[index];
+    });
+    const groups = [];
+    points.forEach(function(point) {
+        const chrom = point.chrom.toUpperCase() === 'M' ? 'MT' : point.chrom.toUpperCase();
+        let group = groups[groups.length - 1];
+        if (!group || group.chrom !== chrom) {
+            group = { chrom: chrom, points: [], observedMax: 1 };
+            groups.push(group);
+        }
+        group.points.push(point);
+        group.observedMax = Math.max(group.observedMax, point.pos);
+    });
+    let genomeOffset = 0;
+    const gap = 5000000;
+    groups.forEach(function(group) {
+        group.length = lengthMap[group.chrom] || group.observedMax;
+        group.offset = genomeOffset;
+        group.center = genomeOffset + group.length / 2;
+        genomeOffset += group.length + gap;
+    });
+    const genomeSpan = Math.max(1, genomeOffset - gap);
+    const colors = ['#2563eb', '#7c3aed'];
+    let rendered = [];
+
+    function draw() {
+        const width = Math.max(620, Math.floor(shell.clientWidth - 20));
+        const height = 400;
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        canvas.width = Math.floor(width * dpr);
+        canvas.height = Math.floor(height * dpr);
+        canvas.style.height = height + 'px';
+        const ctx = canvas.getContext('2d');
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.clearRect(0, 0, width, height);
+        const margin = { left: 58, right: 18, top: 18, bottom: 50 };
+        const plotWidth = width - margin.left - margin.right;
+        const plotHeight = height - margin.top - margin.bottom;
+        const maxScore = Math.max.apply(null, points.map(function(point) { return point.score; }));
+        const maxY = Math.max(8, Math.ceil(maxScore + 0.5));
+        const suggestiveThreshold = Number(rawData.suggestive_threshold || 1e-5);
+        const genomeWideThreshold = Number(rawData.genome_wide_threshold || 5e-8);
+        const xScale = function(value) { return margin.left + value / genomeSpan * plotWidth; };
+        const yScale = function(value) { return margin.top + plotHeight - Math.min(value, maxY) / maxY * plotHeight; };
+
+        ctx.font = '11px DejaVu Sans, sans-serif';
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'middle';
+        ctx.strokeStyle = 'rgba(91,118,160,.14)';
+        ctx.fillStyle = '#61718a';
+        const tickStep = maxY <= 10 ? 2 : Math.ceil(maxY / 5);
+        for (let tick = 0; tick <= maxY; tick += tickStep) {
+            const y = yScale(tick);
+            ctx.beginPath(); ctx.moveTo(margin.left, y); ctx.lineTo(width - margin.right, y); ctx.stroke();
+            ctx.fillText(String(tick), margin.left - 9, y);
+        }
+        ctx.save();
+        ctx.translate(15, margin.top + plotHeight / 2);
+        ctx.rotate(-Math.PI / 2);
+        ctx.textAlign = 'center';
+        ctx.fillStyle = '#425875';
+        ctx.fillText('−log10(p)', 0, 0);
+        ctx.restore();
+
+        function thresholdLine(pValue, color, label) {
+            const score = -Math.log10(pValue);
+            if (score > maxY) return;
+            const y = yScale(score);
+            ctx.save();
+            ctx.setLineDash([6, 5]); ctx.strokeStyle = color; ctx.lineWidth = 1.2;
+            ctx.beginPath(); ctx.moveTo(margin.left, y); ctx.lineTo(width - margin.right, y); ctx.stroke();
+            ctx.setLineDash([]); ctx.fillStyle = color; ctx.textAlign = 'right'; ctx.textBaseline = 'bottom';
+            ctx.fillText(label, width - margin.right, y - 3); ctx.restore();
+        }
+        thresholdLine(suggestiveThreshold, '#d97706', 'suggestive 1×10⁻⁵');
+        thresholdLine(genomeWideThreshold, '#dc2626', 'genome-wide 5×10⁻⁸');
+
+        ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+        groups.forEach(function(group, groupIndex) {
+            const center = xScale(group.center);
+            ctx.fillStyle = '#52677f';
+            ctx.fillText(group.chrom, center, margin.top + plotHeight + 12);
+            if (groupIndex > 0) {
+                const boundary = xScale(group.offset - gap / 2);
+                ctx.strokeStyle = 'rgba(91,118,160,.1)';
+                ctx.beginPath(); ctx.moveTo(boundary, margin.top); ctx.lineTo(boundary, margin.top + plotHeight); ctx.stroke();
+            }
+        });
+
+        rendered = [];
+        const radius = points.length > 8000 ? 1.5 : (points.length > 2000 ? 2 : 3.5);
+        const labelCandidates = [];
+        groups.forEach(function(group, groupIndex) {
+            ctx.fillStyle = colors[groupIndex % colors.length];
+            group.points.forEach(function(point) {
+                const x = xScale(group.offset + Math.min(point.pos, group.length));
+                const y = yScale(point.score);
+                ctx.beginPath(); ctx.arc(x, y, point.p <= 5e-8 ? radius + 1.5 : radius, 0, Math.PI * 2); ctx.fill();
+                rendered.push({ x: x, y: y, point: point });
+                if (point.p <= suggestiveThreshold) {
+                    labelCandidates.push({ x: x, y: y, point: point });
+                }
+            });
+        });
+
+        // Label significant points (those breaching the suggestive line) so IDs
+        // are readable without hovering. Denser plots label only the strongest.
+        labelCandidates.sort(function(a, b) { return b.point.score - a.point.score; });
+        const maxLabels = plotWidth < 520 ? 6 : 12;
+        const placed = [];
+        ctx.font = '10px DejaVu Sans, sans-serif';
+        ctx.textBaseline = 'bottom';
+        labelCandidates.slice(0, maxLabels).forEach(function(item) {
+            const text = item.point.id || ('chr' + item.point.chrom + ':' + item.point.pos);
+            const textWidth = ctx.measureText(text).width;
+            let labelX = Math.max(margin.left + 2, Math.min(item.x - textWidth / 2, width - margin.right - textWidth));
+            let labelY = item.y - 7;
+            // Nudge upward if this label would overlap an already placed one.
+            let guard = 0;
+            while (guard < 6 && placed.some(function(box) {
+                return Math.abs(box.y - labelY) < 12 && labelX < box.x + box.w + 4 && labelX + textWidth > box.x - 4;
+            })) {
+                labelY -= 12;
+                guard += 1;
+            }
+            if (labelY < margin.top + 8) labelY = item.y + 16;
+            placed.push({ x: labelX, y: labelY, w: textWidth });
+            ctx.fillStyle = 'rgba(255,255,255,.82)';
+            ctx.fillRect(labelX - 2, labelY - 11, textWidth + 4, 12);
+            ctx.fillStyle = item.point.p <= genomeWideThreshold ? '#b3251c' : '#8a5a12';
+            ctx.fillText(text, labelX, labelY);
+            // Connector from label to point.
+            ctx.strokeStyle = 'rgba(120,140,170,.5)';
+            ctx.lineWidth = 0.8;
+            ctx.beginPath(); ctx.moveTo(item.x, item.y - radius - 1); ctx.lineTo(labelX + textWidth / 2, labelY + 1); ctx.stroke();
+        });
+    }
+
+    function hideTooltip() { tooltip.classList.remove('visible'); }
+    function inspectPoint(event) {
+        const rect = canvas.getBoundingClientRect();
+        const x = event.clientX - rect.left;
+        const y = event.clientY - rect.top;
+        let nearest = null;
+        let nearestDistance = 100;
+        rendered.forEach(function(item) {
+            const distance = (item.x - x) * (item.x - x) + (item.y - y) * (item.y - y);
+            if (distance < nearestDistance) { nearestDistance = distance; nearest = item; }
+        });
+        if (!nearest || nearestDistance > 81) { hideTooltip(); return; }
+        const point = nearest.point;
+        tooltip.replaceChildren();
+        const title = document.createElement('strong');
+        title.textContent = (point.id || 'Variant') + ' • chr' + point.chrom + ':' + point.pos.toLocaleString();
+        const detail = document.createElement('span');
+        detail.textContent = point.ref + '>' + point.alt + ' • p=' + point.p.toExponential(3) +
+            ' • −log10(p)=' + point.score.toFixed(2);
+        tooltip.append(title, detail);
+        tooltip.classList.add('visible');
+        const left = Math.max(8, Math.min(nearest.x + 12, shell.clientWidth - tooltip.offsetWidth - 8));
+        const top = Math.max(8, Math.min(nearest.y + 12, shell.clientHeight - tooltip.offsetHeight - 8));
+        tooltip.style.left = left + 'px'; tooltip.style.top = top + 'px';
+    }
+    canvas.addEventListener('pointermove', inspectPoint);
+    canvas.addEventListener('pointerleave', hideTooltip);
+    draw();
+    if (window.ResizeObserver) {
+        const observer = new ResizeObserver(draw);
+        observer.observe(shell);
+    } else {
+        window.addEventListener('resize', draw, { passive: true });
+    }
+}
+
+function renderChromosomeDistribution(host, rawData) {
+    const canonical = [];
+    for (let i = 1; i <= 22; i += 1) canonical.push(String(i));
+    canonical.push('X', 'Y', 'MT');
+    const rows = (rawData.distribution || []).map(function(item) {
+        const chrom = String(item.chrom || '').replace(/^chr/i, '').toUpperCase().replace(/^M$/, 'MT');
+        return { chrom: chrom, count: Number(item.count || 0) };
+    }).filter(function(item) { return item.chrom && item.count > 0; });
+    rows.sort(function(a, b) {
+        const ai = canonical.indexOf(a.chrom), bi = canonical.indexOf(b.chrom);
+        return (ai < 0 ? canonical.length : ai) - (bi < 0 ? canonical.length : bi) || a.chrom.localeCompare(b.chrom);
+    });
+
+    if (!rows.length) {
+        const empty = document.createElement('p');
+        empty.className = 'manhattan-empty';
+        empty.textContent = 'No carried or site ALT variants are available for chromosome distribution.';
+        host.appendChild(empty);
+        host.style.minHeight = '0';
+        return;
+    }
+
+    host.style.minHeight = '';
+    const shell = document.createElement('div');
+    shell.className = 'manhattan-shell';
+    const canvas = document.createElement('canvas');
+    canvas.className = 'manhattan-canvas';
+    canvas.setAttribute('role', 'img');
+    canvas.setAttribute('aria-label', 'Variant counts across ' + rows.length + ' chromosomes');
+    shell.appendChild(canvas);
+    host.appendChild(shell);
+
+    const meta = document.createElement('div');
+    meta.className = 'manhattan-meta';
+    [
+        'View: chromosome distribution',
+        'Scope: ' + (rawData.scope === 'all_site_alleles' ? 'all site alleles' : 'carried alleles'),
+        'Variants: ' + Number(rawData.inspected_alleles || rows.reduce(function(sum, row) { return sum + row.count; }, 0)).toLocaleString(),
+        'Association p-values: not supplied'
+    ].forEach(function(text) {
+        const item = document.createElement('span');
+        item.textContent = text;
+        meta.appendChild(item);
+    });
+    host.appendChild(meta);
+
+    function draw() {
+        const width = Math.max(620, Math.floor(shell.clientWidth - 20));
+        const height = 400;
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        canvas.width = Math.floor(width * dpr);
+        canvas.height = Math.floor(height * dpr);
+        canvas.style.height = height + 'px';
+        const ctx = canvas.getContext('2d');
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.clearRect(0, 0, width, height);
+        const margin = { left: 58, right: 18, top: 28, bottom: 50 };
+        const plotWidth = width - margin.left - margin.right;
+        const plotHeight = height - margin.top - margin.bottom;
+        const maxCount = Math.max.apply(null, rows.map(function(row) { return row.count; }));
+        const maxY = Math.max(1, maxCount);
+        const slot = plotWidth / rows.length;
+        const barWidth = Math.max(5, Math.min(42, slot * .66));
+
+        ctx.font = '11px DejaVu Sans, sans-serif';
+        ctx.strokeStyle = 'rgba(91,118,160,.14)';
+        ctx.fillStyle = '#61718a';
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'middle';
+        const steps = Math.min(5, maxY);
+        for (let index = 0; index <= steps; index += 1) {
+            const value = Math.round(maxY * index / steps);
+            const y = margin.top + plotHeight - value / maxY * plotHeight;
+            ctx.beginPath(); ctx.moveTo(margin.left, y); ctx.lineTo(width - margin.right, y); ctx.stroke();
+            ctx.fillText(String(value), margin.left - 9, y);
+        }
+        ctx.save();
+        ctx.translate(15, margin.top + plotHeight / 2);
+        ctx.rotate(-Math.PI / 2);
+        ctx.textAlign = 'center'; ctx.fillStyle = '#425875'; ctx.fillText('Variant count', 0, 0);
+        ctx.restore();
+
+        rows.forEach(function(row, index) {
+            const x = margin.left + slot * index + (slot - barWidth) / 2;
+            const barHeight = row.count / maxY * plotHeight;
+            const gradient = ctx.createLinearGradient(0, margin.top + plotHeight - barHeight, 0, margin.top + plotHeight);
+            gradient.addColorStop(0, index % 2 ? '#7c3aed' : '#2563eb');
+            gradient.addColorStop(1, index % 2 ? '#a78bfa' : '#60a5fa');
+            ctx.fillStyle = gradient;
+            ctx.fillRect(x, margin.top + plotHeight - barHeight, barWidth, barHeight);
+            ctx.fillStyle = '#52677f'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+            ctx.fillText(row.chrom, x + barWidth / 2, margin.top + plotHeight + 12);
+            if (rows.length <= 24) {
+                ctx.textBaseline = 'bottom';
+                ctx.fillText(String(row.count), x + barWidth / 2, margin.top + plotHeight - barHeight - 4);
+            }
+        });
+    }
+    draw();
+    if (window.ResizeObserver) {
+        const observer = new ResizeObserver(draw);
+        observer.observe(shell);
+    } else {
+        window.addEventListener('resize', draw, { passive: true });
+    }
 }
 
 function renderMutationDonut(rawCounts) {

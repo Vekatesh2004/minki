@@ -1,0 +1,47 @@
+# Keep the image small and free of sensitive/local data.
+.git/
+.gitignore
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# User uploads and generated data (never ship patient/genomic data)
+uploads/
+results/
+*.db
+*.sqlite
+*.sqlite3
+data/
+
+# Local VCF test data except the curated examples
+*.vcf
+*.vcf.gz
+!examples/*.vcf
+!examples/*.vcf.gz
+
+# Secrets
+.env
+*.pem
+
+# External review-only repositories and large docs assets
+reference_repositories/
+docs/*.png
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Other entry points not used by this single-image build
+frontend/
+docker/
+nginx/
+deploy/

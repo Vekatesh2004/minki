@@ -106,4 +106,4 @@ NOTE ON LICENSING
 ---------------------
 DrugBank's license terms restrict redistribution and certain automated-use patterns. Check
 your license tier against how this pipeline will be run/served (local tool vs. any
-shared/hosted service) before wiring up bulk XML parsing.
+shared/hosted service) before wiring up bulk XML parsing. 

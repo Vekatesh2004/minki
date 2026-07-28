@@ -1,0 +1,29 @@
+digraph MinkiClientFlow {
+  graph [rankdir=TB, bgcolor="#FFFFFF", pad="0.4", nodesep="0.4", ranksep="0.6",
+         splines=spline, fontname="DejaVu Sans",
+         label="HelixAI / Minki — Pharmacogenomics Analysis Pipeline",
+         labelloc="t", fontsize=22, fontcolor="#10284D"];
+  node [shape=box, style="rounded,filled", fontname="DejaVu Sans", fontsize=11,
+        color="#A8BBDD", fillcolor="#FFFFFF", fontcolor="#17345E", margin="0.2,0.12"];
+  edge [color="#5B76A0", penwidth=1.5, arrowsize=0.8];
+
+  user   [label="1. Research user\nuploads VCF (+ optional phenotype)", shape=oval, fillcolor="#EAF2FF"];
+  ui     [label="2. Web app (FastAPI)\nupload • example • GWAS", fillcolor="#EAFBF6", color="#159A83", penwidth=2];
+  parse  [label="3. VCF parsing + QC\nvariants, genotypes, build, Ts/Tv, depth"];
+
+  vep    [label="4. Variant annotation\nEnsembl VEP REST API", shape=component, fillcolor="#F0F6FF"];
+  struct [label="5. Protein structure\nUniProt + AlphaFold API", shape=component, fillcolor="#F0F6FF"];
+  drug   [label="6. Drug interactions\nClinPGx/PharmGKB (+DrugBank)", shape=component, fillcolor="#F0F6FF"];
+  diab   [label="7. Diabetes context\ncurated KB + optional ClinVar"];
+  gwas   [label="8. GWAS / Manhattan plot\nreal association or HWE (genotype-only)", fillcolor="#EAFBF6", color="#159A83", penwidth=2];
+
+  results [label="9. Interactive results dashboard\nsummary • mutations • 3D viewer • Manhattan • CSV", fillcolor="#EAFBF6", color="#159A83", penwidth=2];
+  disc    [label="Research / education only — not diagnosis or prescribing advice",
+           shape=note, fillcolor="#FFF4DF", color="#D7A64D", fontcolor="#704B10", fontsize=10];
+
+  user -> ui -> parse;
+  parse -> vep; parse -> gwas;
+  vep -> struct; vep -> drug; vep -> diab;
+  struct -> results; drug -> results; diab -> results; gwas -> results;
+  results -> disc [style=dashed, arrowhead=none];
+}

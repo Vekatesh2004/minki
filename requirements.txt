@@ -5,6 +5,11 @@ requests>=2.31.0
 py3Dmol>=2.0.0
 pandas>=2.0.0
 
+# GWAS association testing (true Manhattan plot)
+numpy>=1.24.0
+scipy>=1.10.0
+statsmodels>=0.14.0
+
 # MCP support
 mcp>=0.5.0
 pydantic>=2.0.0

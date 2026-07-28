@@ -24,10 +24,12 @@ class DrugMatcher:
         self.drugbank_api_key = self.drugbank_config.get("api_key")
         self.rate_limit_delay = self.drugbank_config.get("rate_limit_delay", 1.0)
         
-        self.pharmgkb_base_url = self.pharmgkb_config.get("base_url", "https://api.pharmgkb.org/v1")
+        self.pharmgkb_base_url = self.pharmgkb_config.get("base_url", "https://api.clinpgx.org/v1")
+        self._pharmgkb_last_status = "not_checked"
         
-        # Initialize local drug database
-        self.db_path = "drug_cache.db"
+        # Initialize the local public pharmacogene index. INSERT OR IGNORE plus
+        # a uniqueness index keeps startup idempotent on fresh installations.
+        self.db_path = str(Path(__file__).resolve().parents[1] / "drug_cache.db")
         self._init_local_database()
         
     def _init_local_database(self):
@@ -65,16 +67,56 @@ class DrugMatcher:
                 )
             ''')
             
-            # Create indexes
+            # Remove legacy duplicate seed rows, then enforce idempotent seeds.
+            cursor.execute('''
+                DELETE FROM drug_targets
+                WHERE id NOT IN (
+                    SELECT MIN(id) FROM drug_targets
+                    GROUP BY drug_id, drug_name, target_gene_symbol
+                )
+            ''')
+            cursor.execute('''
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_drug_target
+                ON drug_targets(drug_id, drug_name, target_gene_symbol)
+            ''')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_gene_symbol ON drug_targets(target_gene_symbol)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_uniprot_id ON drug_targets(target_uniprot_id)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_pgx_gene ON pharmacogenomic_annotations(gene_symbol)')
+            self._seed_known_pharmacogenes(cursor)
             
             conn.commit()
             conn.close()
             
         except Exception as e:
             logger.error(f"Error initializing drug database: {str(e)}")
+
+    @staticmethod
+    def _seed_known_pharmacogenes(cursor):
+        """Install the small public demonstration index on every fresh DB."""
+        known = {
+            "CYP2D6": [("Codeine", "substrate"), ("Tramadol", "substrate"),
+                        ("Metoprolol", "substrate"), ("Risperidone", "substrate")],
+            "CYP2C19": [("Clopidogrel", "substrate"), ("Omeprazole", "substrate"),
+                         ("Escitalopram", "substrate")],
+            "CYP2C9": [("Warfarin", "substrate"), ("Phenytoin", "substrate"),
+                        ("Celecoxib", "substrate")],
+            "TPMT": [("Azathioprine", "substrate"), ("Mercaptopurine", "substrate")],
+            "DPYD": [("Fluorouracil", "substrate"), ("Capecitabine", "substrate")],
+            "VKORC1": [("Warfarin", "target")],
+        }
+        rows = []
+        for gene, drugs in known.items():
+            for drug_name, action in drugs:
+                rows.append((
+                    f"pgx_{drug_name.lower().replace(' ', '_')}", drug_name, gene,
+                    None, action, "Human", "Vitamin K recycling" if gene == "VKORC1" else "Metabolism",
+                ))
+        cursor.executemany('''
+            INSERT OR IGNORE INTO drug_targets
+                (drug_id, drug_name, target_gene_symbol, target_uniprot_id,
+                 action, organism, pharmacology)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', rows)
             
     async def match_drugs(self, gene_symbol: str, uniprot_id: Optional[str] = None, 
                          hgvsp: Optional[str] = None) -> Dict[str, Any]:
@@ -96,12 +138,17 @@ class DrugMatcher:
             # Search DrugBank API for additional matches
             drugbank_drugs = await self._search_drugbank_api(gene_symbol, uniprot_id)
             
-            # Search PharmGKB for pharmacogenomic annotations
+            # Search ClinPGx/PharmGKB for pharmacogenomic annotations.
+            # Availability is tracked separately from an empty successful result.
             pharmgkb_annotations = await self._search_pharmgkb(gene_symbol, hgvsp)
+            pharmgkb_status = self._pharmgkb_last_status
             
             # Combine and rank results
             all_drugs = self._combine_drug_results(cached_drugs, drugbank_drugs)
-            ranked_drugs = self._rank_drug_matches(all_drugs, pharmgkb_annotations, hgvsp)
+            ranked_drugs = self._rank_drug_matches(
+                all_drugs, pharmgkb_annotations, hgvsp,
+                evidence_available=pharmgkb_status == "available",
+            )
             
             return {
                 "gene_symbol": gene_symbol,
@@ -109,6 +156,7 @@ class DrugMatcher:
                 "hgvsp": hgvsp,
                 "matched_drugs": ranked_drugs,
                 "pharmgkb_annotations": pharmgkb_annotations,
+                "pharmgkb_status": pharmgkb_status,
                 "total_matches": len(ranked_drugs)
             }
             
@@ -263,67 +311,57 @@ class DrugMatcher:
         return drugs
         
     async def _search_pharmgkb(self, gene_symbol: str, hgvsp: Optional[str]) -> List[Dict[str, Any]]:
-        """Search PharmGKB clinical annotations for a gene.
+        """Search ClinPGx and distinguish an empty result from an outage."""
 
-        The public PharmGKB API expects the gene to be referenced through
-        `location.genes.symbol` and `view=max` to expand related chemicals and
-        the level of evidence. One clinical annotation can reference several
-        drugs, so we emit one record per (annotation, drug).
-        """
+        annotations: List[Dict[str, Any]] = []
+        self._pharmgkb_last_status = "not_checked"
+        search_url = f"{self.pharmgkb_base_url}/data/clinicalAnnotation"
+        params = {"location.genes.symbol": gene_symbol}
+        retryable = {429, 500, 502, 503, 504}
 
-        annotations = []
+        for attempt in range(2):
+            try:
+                timeout = aiohttp.ClientTimeout(total=60)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.get(search_url, params=params) as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            if not isinstance(data, dict) or not isinstance(data.get("data", []), list):
+                                raise ValueError("ClinPGx returned an invalid response shape")
+                            self._pharmgkb_last_status = "available"
+                            for annotation in data.get("data", []):
+                                loe = annotation.get("levelOfEvidence") or {}
+                                level_term = loe.get("term")
+                                variant_label = annotation.get("name")
+                                acc = annotation.get("accessionId")
+                                url = (f"https://www.pharmgkb.org/clinicalAnnotation/{acc}"
+                                       if acc else None)
+                                for chemical in annotation.get("relatedChemicals", []) or []:
+                                    annotations.append({
+                                        "gene": gene_symbol,
+                                        "variant": variant_label,
+                                        "drug": chemical.get("name"),
+                                        "phenotype": annotation.get("phenotypeCategory"),
+                                        "evidence_level": level_term,
+                                        "score": annotation.get("score"),
+                                        "url": url,
+                                        "source": "pharmgkb",
+                                    })
+                            return annotations
 
-        try:
-            search_url = f"{self.pharmgkb_base_url}/data/clinicalAnnotation"
-            # Note: we deliberately do NOT use view=max. The default view already
-            # includes levelOfEvidence and relatedChemicals, and is small enough
-            # to download reliably. view=max returns a very large payload that can
-            # time out mid-download.
-            params = {
-                "location.genes.symbol": gene_symbol,
-            }
+                        if response.status not in retryable:
+                            self._pharmgkb_last_status = "unavailable"
+                            logger.warning("ClinPGx API error: %s", response.status)
+                            return []
+                        logger.warning("ClinPGx temporary API error: %s", response.status)
+            except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+                logger.warning("ClinPGx request failed (attempt %s): %s", attempt + 1, exc)
 
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
-                async with session.get(search_url, params=params) as response:
+            if attempt == 0:
+                await asyncio.sleep(0.5)
 
-                    if response.status == 200:
-                        data = await response.json()
-                        clinical_annotations = data.get("data", [])
-
-                        for annotation in clinical_annotations:
-                            # Level of evidence, e.g. "1A", "2A", "3"
-                            loe = annotation.get("levelOfEvidence") or {}
-                            level_term = loe.get("term")
-
-                            # Variant/allele label
-                            variant_label = annotation.get("name")
-
-                            # Direct PharmGKB link for confirmation
-                            acc = annotation.get("accessionId")
-                            url = (f"https://www.pharmgkb.org/clinicalAnnotation/{acc}"
-                                   if acc else None)
-
-                            # One clinical annotation can involve multiple drugs
-                            chemicals = annotation.get("relatedChemicals", []) or []
-                            for chem in chemicals:
-                                annotations.append({
-                                    "gene": gene_symbol,
-                                    "variant": variant_label,
-                                    "drug": chem.get("name"),
-                                    "phenotype": annotation.get("phenotypeCategory"),
-                                    "evidence_level": level_term,
-                                    "score": annotation.get("score"),
-                                    "url": url,
-                                    "source": "pharmgkb",
-                                })
-
-                    elif response.status != 404:
-                        logger.warning(f"PharmGKB API error: {response.status}")
-
-        except Exception as e:
-            logger.error(f"Error searching PharmGKB: {str(e)}")
-
-        return annotations
+        self._pharmgkb_last_status = "unavailable"
+        return []
         
     def _combine_drug_results(self, cached_drugs: List[Dict[str, Any]], 
                              drugbank_drugs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -354,7 +392,8 @@ class DrugMatcher:
         
     def _rank_drug_matches(self, drugs: List[Dict[str, Any]], 
                           pharmgkb_annotations: List[Dict[str, Any]], 
-                          hgvsp: Optional[str]) -> List[Dict[str, Any]]:
+                          hgvsp: Optional[str],
+                          evidence_available: bool = True) -> List[Dict[str, Any]]:
         """Rank drug matches based on evidence and relevance"""
         
         # Create mapping of drug names to PharmGKB annotations
@@ -379,7 +418,7 @@ class DrugMatcher:
         for drug in drugs:
             drug_name = drug.get('drug_name', '').lower()
             score = 10  # base score for having a drug-target relationship
-            evidence_level = "no_pgx_evidence"
+            evidence_level = "no_pgx_evidence" if evidence_available else "evidence_unavailable"
             best_rank = -1
 
             if drug_name in pharmgkb_map:

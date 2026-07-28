@@ -68,10 +68,13 @@ def create_example_vcf():
     
     vcf_path = Path("examples/sample_pharmacogenomics.vcf")
     vcf_path.parent.mkdir(exist_ok=True)
-    
+    if vcf_path.exists():
+        print(f"Preserved existing example VCF: {vcf_path}")
+        return
+
     with open(vcf_path, 'w') as f:
         f.write(vcf_content)
-        
+
     print(f"Created example VCF: {vcf_path}")
 
 if __name__ == "__main__":

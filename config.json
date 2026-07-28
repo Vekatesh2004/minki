@@ -17,7 +17,19 @@
     "rate_limit_delay": 1.0
   },
   "pharmgkb": {
-    "base_url": "https://api.pharmgkb.org/v1"
+    "base_url": "https://api.clinpgx.org/v1"
+  },
+  "clinvar": {
+    "enabled": true,
+    "diabetes_only": true,
+    "indexes": {
+      "GRCh37": "data/clinvar/clinvar_grch37.sqlite",
+      "GRCh38": "data/clinvar/clinvar_grch38.sqlite"
+    }
+  },
+  "diabetes_common_risk": {
+    "enabled": true,
+    "catalog_path": "data/diabetes_common_risk.json"
   },
   "qc_thresholds": {
     "min_qual": 30,

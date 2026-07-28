@@ -1,0 +1,51 @@
+{
+  "source": {
+    "name": "SYNTHETIC DEMO common-risk catalog",
+    "version": "SYNTHETIC-DEMO-v1",
+    "notice": "Illustrative demonstration data only; not validated or for clinical use"
+  },
+  "records": [
+    {
+      "build": "GRCh38",
+      "chrom": "11",
+      "pos": 17388025,
+      "ref": "T",
+      "alt": "C",
+      "rsid": "rs5219",
+      "gene": "KCNJ11",
+      "trait": "Type 2 diabetes",
+      "effect_allele": "C",
+      "odds_ratio": "1.14",
+      "ancestry": "European",
+      "study": "SYNTHETIC-DEMO (illustrative; not a real study)"
+    },
+    {
+      "build": "GRCh38",
+      "chrom": "8",
+      "pos": 117172544,
+      "ref": "C",
+      "alt": "T",
+      "rsid": "rs13266634",
+      "gene": "SLC30A8",
+      "trait": "Type 2 diabetes",
+      "effect_allele": "C",
+      "odds_ratio": "1.12",
+      "ancestry": "Multi-ancestry",
+      "study": "SYNTHETIC-DEMO (illustrative; not a real study)"
+    },
+    {
+      "build": "GRCh38",
+      "chrom": "3",
+      "pos": 12351626,
+      "ref": "C",
+      "alt": "G",
+      "rsid": "rs1801282",
+      "gene": "PPARG",
+      "trait": "Type 2 diabetes (protective)",
+      "effect_allele": "G",
+      "odds_ratio": "0.86",
+      "ancestry": "European",
+      "study": "SYNTHETIC-DEMO (illustrative; not a real study)"
+    }
+  ]
+}

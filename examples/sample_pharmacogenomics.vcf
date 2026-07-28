@@ -1,17 +1,24 @@
 ##fileformat=VCFv4.2
-##source=PharmacogenomicsExample
+##source=MinkiSyntheticDemonstration
 ##reference=GRCh38
+##MinkiNotice="Synthetic research/education example; not a patient profile or diagnosis"
+##MinkiAssociationNotice="PVAL values are synthetic visualization fixtures, not study results"
+##contig=<ID=3,length=198295559>
+##contig=<ID=8,length=145138636>
+##contig=<ID=10,length=133797422>
+##contig=<ID=11,length=135086622>
+##contig=<ID=12,length=133275309>
 ##contig=<ID=22,length=50818468>
 ##INFO=<ID=DP,Number=1,Type=Integer,Description="Total Depth">
+##INFO=<ID=PVAL,Number=A,Type=Float,Description="Synthetic association p-value for Manhattan plot demonstration only">
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
 ##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Read Depth">
 #CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	SAMPLE1
-22	42126611	rs16947	A	G	60	PASS	DP=30	GT:DP	1/1:30
-22	42127803	rs1065852	G	A	85	PASS	DP=45	GT:DP	0/1:45
-22	42128936	rs3892097	C	T	92	PASS	DP=38	GT:DP	0/1:38
-19	15990431	rs4149056	T	C	78	PASS	DP=42	GT:DP	1/1:42
-19	15881965	rs2306283	A	G	65	PASS	DP=35	GT:DP	0/1:35
-10	96522463	rs1799853	C	T	88	PASS	DP=50	GT:DP	0/1:50
-10	96541616	rs1057910	A	C	95	PASS	DP=48	GT:DP	0/1:48
-6	18130918	rs1801131	T	G	70	PASS	DP=40	GT:DP	0/1:40
-6	18143955	rs1801133	C	T	82	PASS	DP=44	GT:DP	0/1:44
+11	17388025	rs5219	T	C	92	PASS	DP=44;PVAL=2.1e-8	GT:DP	0/1:44
+3	12351626	rs1801282	C	G	88	PASS	DP=41;PVAL=4.8e-6	GT:DP	0/1:41
+8	117172544	rs13266634	C	T	90	PASS	DP=46;PVAL=1.3e-7	GT:DP	0/1:46
+10	94942290	rs1799853	C	T	94	PASS	DP=51;PVAL=0.0024	GT:DP	0/1:51
+10	94981296	rs1057910	A	C	96	PASS	DP=49;PVAL=7.6e-9	GT:DP	0/1:49
+12	21178615	rs4149056	T	C	91	PASS	DP=47;PVAL=3.2e-5	GT:DP	0/1:47
+22	42130692	rs1065852	G	A	89	PASS	DP=43;PVAL=8.4e-4	GT:DP	0/1:43
+22	42128945	rs3892097	C	T	93	PASS	DP=45;PVAL=0.031	GT:DP	0/1:45

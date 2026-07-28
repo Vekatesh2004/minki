@@ -1,0 +1,229 @@
+digraph MinkiAuditedArchitecture {
+  graph [rankdir=TB, bgcolor="#F7F9FC", pad="0.35", nodesep="0.32", ranksep="0.52", splines=polyline, fontname="DejaVu Sans", label="MINKI / HELIXAI — AUDITED WHOLE-PROJECT ARCHITECTURE", labelloc="t", fontsize=24, fontcolor="#10284D"];
+  node [shape=box, style="rounded,filled", fontname="DejaVu Sans", fontsize=9.5, color="#A8BBDD", fillcolor="#FFFFFF", fontcolor="#17345E", margin="0.14,0.09"];
+  edge [color="#6681AA", penwidth=1.35, arrowsize=0.7, fontname="DejaVu Sans", fontsize=8, fontcolor="#536984"];
+
+  subgraph cluster_legend {
+    label="STATUS LEGEND"; color="#D8E0EC"; fillcolor="#FFFFFF"; style="rounded,filled";
+    activekey [label="ACTIVE: python simple_backend.py", color="#159A83", fillcolor="#EAFBF6", penwidth=2];
+    separatekey [label="SEPARATE IMPLEMENTED ENTRY POINT", color="#3975D4", fillcolor="#EDF4FF", penwidth=2];
+    unwiredkey [label="IMPLEMENTED BUT NOT WIRED", color="#D18B20", fillcolor="#FFF8E8", style="rounded,filled,dashed"];
+    futurekey [label="PLANNED / INCOMPLETE", color="#8794A8", fillcolor="#F4F6F8", style="rounded,filled,dotted"];
+    optionalkey [label="OPTIONAL INTEGRATION", color="#8A61C9", fillcolor="#F8F2FF", style="rounded,filled,dashed"];
+    {rank=same; activekey; separatekey; unwiredkey; futurekey; optionalkey;}
+  }
+
+  subgraph cluster_active_access {
+    label="ACTIVE LOCAL / EC2 PRODUCT"; color="#68C9B6"; fillcolor="#ECFCF8"; style="rounded,filled"; fontcolor="#08786F";
+    user [label="Research user", shape=oval];
+    input [label="VCF/VCF.GZ + display sample ID", shape=note, fillcolor="#FFF9E8"];
+    example [label="Bundled synthetic GRCh38 VCF", shape=note, fillcolor="#EFFBF5"];
+    ui_submit [label="Embedded UI — input phase\nsimple_backend.py", color="#159A83", fillcolor="#FFFFFF", penwidth=2];
+    ui_results [label="Embedded UI — results phase\nsame browser page", color="#159A83", fillcolor="#FFFFFF", penwidth=2];
+    local [label="Local: browser → Uvicorn\n127.0.0.1:8000"];
+    ec2 [label="Optional EC2: nginx :80 → Uvicorn\nsystemd supervision", color="#8A61C9", fillcolor="#F8F2FF", style="rounded,filled,dashed"];
+    app [label="Active FastAPI app\nsimple_backend.py", color="#159A83", fillcolor="#EAFBF6", penwidth=2];
+    user -> ui_submit; input -> ui_submit; example -> ui_submit;
+    ui_submit -> local -> app;
+    ui_submit -> ec2 -> app [style=dashed, color="#8A61C9"];
+  }
+
+  subgraph cluster_active_ingest {
+    label="ACTIVE INGESTION & VOLATILE JOB CONTROL"; color="#68C9B6"; fillcolor="#F1FCF9"; style="rounded,filled"; fontcolor="#08786F";
+    uploadroute [label="POST /api/upload\nvalidate suffix + genome build; read whole file"];
+    exampleroute [label="POST /api/example\nuse bundled file directly"];
+    gwasroute [label="POST /api/gwas\nmulti-sample VCF (+optional phenotype)", color="#159A83", fillcolor="#EAFBF6", penwidth=2];
+    uploadstore [label="uploads/<uuid>_<name>\nsensitive + Git-ignored", shape=cylinder, fillcolor="#FFF2F2", color="#D99090"];
+    bg [label="In-process FastAPI BackgroundTasks"];
+    ram [label="analysis_storage dict\nprogress/results lost on restart", shape=cylinder];
+    app -> uploadroute; app -> exampleroute; app -> gwasroute;
+    uploadroute -> uploadstore -> bg;
+    exampleroute -> bg;
+    bg -> ram [label="progress/status"];
+  }
+
+  subgraph cluster_gwas {
+    label="ACTIVE GWAS / TRUE MANHATTAN PLOT (modules/gwas.py)"; color="#68C9B6"; fillcolor="#ECFCF8"; style="rounded,filled"; fontcolor="#08786F";
+    gwasparse [label="Parse multi-sample VCF\nper-sample additive ALT dosage 0/1/2"];
+    phenobranch [label="Phenotype table supplied?", shape=diamond, fillcolor="#FFF9E8", color="#D5B257"];
+    assoc [label="Trait association\nlinear (OLS) / logistic regression\nstatsmodels; scipy fallback", color="#159A83", fillcolor="#FFFFFF", penwidth=2];
+    hwe [label="Genotype-only mode\nHardy-Weinberg exact test\n(genotyping/population QC)", color="#159A83", fillcolor="#FFFFFF", penwidth=2];
+    gwasqc [label="Per-variant QC\ncall rate • minor-allele count • monomorphic"];
+    manhattan [label="Real p-values + -log10(p)\n5e-8 genome-wide • 1e-5 suggestive • lambda_GC"];
+    gwasroute -> gwasparse -> phenobranch;
+    phenobranch -> assoc [label="yes: real trait GWAS"];
+    phenobranch -> hwe [label="no: HWE from genotypes"];
+    assoc -> gwasqc; hwe -> gwasqc; gwasqc -> manhattan;
+    gwasparse -> parser [style=dashed, color="#159A83", arrowhead=none, label="uses VCFParser"];
+  }
+
+  subgraph cluster_active_parse {
+    label="ACTIVE VCF PARSING"; color="#68C9B6"; fillcolor="#F1FCF9"; style="rounded,filled"; fontcolor="#08786F";
+    parser [label="VCFParser.parse_vcf", color="#159A83", fillcolor="#FFFFFF", penwidth=2];
+    native [label="Native VCFDocument generated\nbuild + all samples/ALTs + GT/phase/PS"];
+    legacy [label="Legacy variants\ncyvcf2 if installed; basic fallback"];
+    qc [label="QC summary\nPASS • QUAL • depth • genotype • Ts/Tv"];
+    unusednative [label="vcf_metadata + pgx_records returned\nbut ignored by active analysis", color="#D18B20", fillcolor="#FFF8E8", style="rounded,filled,dashed"];
+    bg -> parser;
+    parser -> native;
+    native -> unusednative [style=dashed, color="#D18B20"];
+    parser -> legacy;
+    legacy -> qc;
+  }
+
+  subgraph cluster_active_analysis {
+    label="ACTIVE ANALYSIS ORCHESTRATION"; color="#68C9B6"; fillcolor="#ECFCF8"; style="rounded,filled"; fontcolor="#08786F";
+    pass [label="PASS candidate selection\nfallback to all if none PASS"];
+    cap [label="First MAX_VARIANTS_TO_VEP\ndefault 300", fillcolor="#FFF9E8", color="#D5B257"];
+    vep [label="Ensembl VEP REST\nbatches of 200", shape=component];
+    coding [label="Extract coding mutations\ngene • consequence • HGVSc/HGVSp • residue"];
+    legacy -> pass -> cap -> vep -> coding;
+
+    structureGate [label="Up to 15 unique coding genes\nrequires UniProt ID + residue"];
+    map [label="VEP UniProt ID OR\nUniProt gene/Ensembl mapping", shape=component];
+    afserver [label="Server-side AlphaFold API + PDB", shape=component];
+    pdbtmp [label="Temporary PDB files\n+pLDDT B-factors", shape=cylinder];
+    residue [label="Residue/domain/active/binding-site context"];
+    coding -> structureGate -> map -> afserver -> pdbtmp -> residue;
+
+    drugGate [label="Up to 30 coding genes\nOR six fixed genes when none coding"];
+    sqlite [label="Auto-created/seeded drug_cache.db", shape=cylinder];
+    clinpgx [label="ClinPGx / PharmGKB API\n2 attempts + availability status", shape=component];
+    drugbank [label="DrugBank API if valid key", shape=component, color="#8A61C9", fillcolor="#F8F2FF", style="rounded,filled,dashed"];
+    rank [label="Combine • deduplicate • evidence rank"];
+    coding -> drugGate;
+    drugGate -> sqlite;
+    drugGate -> clinpgx;
+    drugGate -> drugbank [style=dashed, color="#8A61C9"];
+    sqlite -> rank; clinpgx -> rank; drugbank -> rank [style=dashed, color="#8A61C9"];
+
+    diabetes [label="Static diabetes_kb lookup\nfor coding mutation gene"];
+    context [label="Gene-level role/category/significance\n+treatment context + external links"];
+    coding -> diabetes -> context;
+  }
+
+  subgraph cluster_active_output {
+    label="ACTIVE RESULT DELIVERY"; color="#68C9B6"; fillcolor="#F1FCF9"; style="rounded,filled"; fontcolor="#08786F";
+    assemble [label="Assemble active JSON result\nQC + mutations + structures + drugs + diabetes", color="#159A83", fillcolor="#FFFFFF", penwidth=2];
+    poll [label="GET /api/analysis/{uuid}\n1.5 s browser polling"];
+    dashboard [label="Dashboard cards + donut + evidence badges"];
+    csv [label="Generated mutations.csv download"];
+    ngl [label="Browser loads NGL from cdnjs", shape=component];
+    afbrowser [label="Browser independently fetches\nAlphaFold prediction/PDB", shape=component];
+    viewer [label="Interactive pLDDT-colored 3D viewer"];
+    qc -> assemble; coding -> assemble; residue -> assemble; rank -> assemble; context -> assemble;
+    manhattanplot [label="Interactive canvas Manhattan plot\n(GWAS) or chromosome distribution\n(single-sample fallback)"];
+    assemble -> ram -> poll -> dashboard -> ui_results;
+    assemble -> csv -> ui_results;
+    dashboard -> ngl -> afbrowser -> viewer -> ui_results;
+    manhattan -> manhattanplot -> ui_results;
+  }
+
+  subgraph cluster_mcp {
+    label="SEPARATE IMPLEMENTED ENTRY POINT — MCP STDIO"; color="#6C9CE8"; fillcolor="#EDF4FF"; style="rounded,filled"; fontcolor="#245BC9";
+    mcpclient [label="MCP client / agent", shape=oval];
+    mcp [label="pharmacogenomics_mcp.py\n6 MCP tools over stdio", color="#3975D4", fillcolor="#FFFFFF", penwidth=2];
+    mcppipe [label="Independent full pipeline\nparse → all legacy variants to VEP\n→ structure + drug matching"];
+    reports [label="ReportGenerator\nJSON + HTML in results/", shape=cylinder];
+    mcpclient -> mcp -> mcppipe -> reports;
+    mcppipe -> parser [color="#3975D4"];
+    mcppipe -> vep [color="#3975D4"];
+    mcppipe -> map [color="#3975D4"];
+    mcppipe -> rank [color="#3975D4"];
+  }
+
+  subgraph cluster_flask {
+    label="SEPARATE IMPLEMENTED ENTRY POINT — LEGACY FLASK"; color="#6C9CE8"; fillcolor="#EDF4FF"; style="rounded,filled"; fontcolor="#245BC9";
+    flaskuser [label="Legacy web user", shape=oval];
+    flask [label="web_app.py + run_web.py\nFlask/template app :5000", color="#3975D4", fillcolor="#FFFFFF", penwidth=2];
+    flaskfiles [label="Own uploads/ + results/", shape=cylinder];
+    flaskuser -> flask -> flaskfiles;
+    flask -> parser [color="#3975D4"];
+    flask -> vep [color="#3975D4"];
+    flask -> map [color="#3975D4"];
+    flask -> rank [color="#3975D4"];
+  }
+
+  subgraph cluster_prodapi {
+    label="SEPARATE PRODUCTION-ORIENTED FASTAPI (IMPLEMENTED, CURRENTLY NOT CLEANLY RUNNABLE)"; color="#8395B2"; fillcolor="#F3F6FA"; style="rounded,filled,dashed"; fontcolor="#596A84";
+    prodclient [label="Authenticated API client", shape=oval];
+    prod [label="backend/main.py\nJWT + metrics + per-user uploads", color="#3975D4", fillcolor="#FFFFFF", penwidth=2];
+    auth [label="backend/auth.py\nregistration/login/JWT"];
+    postgres [label="PostgreSQL\nusers + analyses", shape=cylinder];
+    prodbg [label="FastAPI BackgroundTasks\nnot Celery"];
+    basic [label="Basic/full currently identical\nparse + six fixed pharmacogenes"];
+    prodissues [label="Known gaps: missing static dir/Response import;\nTaskManager not initialized; gunicorn absent", color="#8794A8", fillcolor="#F4F6F8", style="rounded,filled,dotted"];
+    prodclient -> prod -> auth -> postgres;
+    prod -> prodbg -> basic;
+    basic -> parser [color="#3975D4"];
+    basic -> rank [color="#3975D4"];
+    prodissues -> prod [style=dotted, color="#8794A8", arrowhead=none];
+  }
+
+  subgraph cluster_unwired {
+    label="IMPLEMENTED FOUNDATIONS — NOT WIRED INTO ANY ACTIVE RESULT PATH"; color="#D7A64D"; fillcolor="#FFF9EC"; style="rounded,filled,dashed"; fontcolor="#946317";
+    clinbuilder [label="scripts/build_clinvar_index.py\nstream local/HTTPS ClinVar VCF", color="#D18B20", fillcolor="#FFFFFF", style="rounded,filled,dashed"];
+    clinidx [label="Optional local build-specific\nClinVar SQLite index", shape=cylinder, color="#D18B20", fillcolor="#FFFFFF", style="filled,dashed"];
+    clinann [label="modules/clinvar_annotator.py\nexact build+allele lookup", color="#D18B20", fillcolor="#FFFFFF", style="rounded,filled,dashed"];
+    riskcat [label="Optional validated common-risk JSON", shape=cylinder, color="#D18B20", fillcolor="#FFFFFF", style="filled,dashed"];
+    riskann [label="modules/diabetes_common_risk.py\nexact association matching; no PRS", color="#D18B20", fillcolor="#FFFFFF", style="rounded,filled,dashed"];
+    normalize [label="modules/pgx/normalization.py\nminimal build-aware normalization", color="#D18B20", fillcolor="#FFFFFF", style="rounded,filled,dashed"];
+    defs [label="modules/pgx/definitions.py\nversioned definition validation", color="#D18B20", fillcolor="#FFFFFF", style="rounded,filled,dashed"];
+    clinbuilder -> clinidx [style=dashed, color="#D18B20"];
+    clinidx -> clinann [style=dashed, color="#D18B20"];
+    normalize -> clinann [style=dashed, color="#D18B20"];
+    riskcat -> riskann [style=dashed, color="#D18B20"];
+    normalize -> riskann [style=dashed, color="#D18B20"];
+    defs -> normalize [style=dashed, color="#D18B20"];
+    unusednative -> clinann [label="intended, not connected", style=dashed, color="#D18B20"];
+    unusednative -> riskann [label="intended, not connected", style=dashed, color="#D18B20"];
+  }
+
+  subgraph cluster_future {
+    label="PLANNED PGx CAPABILITIES — NO ACTIVE IMPLEMENTATION"; color="#AAB3C1"; fillcolor="#F5F6F8"; style="rounded,filled,dotted"; fontcolor="#647184";
+    starmatch [label="Deterministic star-allele matcher\nwith ambiguity", color="#8794A8", fillcolor="#FFFFFF", style="rounded,filled,dotted"];
+    phenotype [label="Activity score + phenotype mappings", color="#8794A8", fillcolor="#FFFFFF", style="rounded,filled,dotted"];
+    guidelines [label="Versioned CPIC/DPWG guidance", color="#8794A8", fillcolor="#FFFFFF", style="rounded,filled,dotted"];
+    cnv [label="CNV/SV/hybrid evidence\nCYP2D6 last", color="#8794A8", fillcolor="#FFFFFF", style="rounded,filled,dotted"];
+    defs -> starmatch [style=dotted, color="#8794A8"];
+    cnv -> starmatch [style=dotted, color="#8794A8"];
+    starmatch -> phenotype -> guidelines [style=dotted, color="#8794A8"];
+  }
+
+  subgraph cluster_frontend_docker {
+    label="INTENDED REACT / DOCKER PRODUCTION STACK — INCOMPLETE AS COMMITTED"; color="#AAB3C1"; fillcolor="#F5F6F8"; style="rounded,filled,dotted"; fontcolor="#647184";
+    react [label="frontend/ Vite + React SPA\nimports missing pages/contexts/styles", color="#8794A8", fillcolor="#FFFFFF", style="rounded,filled,dotted"];
+    dnginx [label="Docker nginx :80/:443", color="#8794A8", fillcolor="#FFFFFF", style="rounded,filled,dotted"];
+    dbackend [label="Docker backend.main", color="#8794A8", fillcolor="#FFFFFF", style="rounded,filled,dotted"];
+    redis [label="Redis", shape=cylinder, color="#8794A8", fillcolor="#FFFFFF", style="filled,dotted"];
+    celery [label="Celery worker + beat\nbackend.tasks missing", color="#8794A8", fillcolor="#FFFFFF", style="rounded,filled,dotted"];
+    monitoring [label="Prometheus + Grafana\nreferenced configs missing", color="#8794A8", fillcolor="#FFFFFF", style="rounded,filled,dotted"];
+    dockerissues [label="Missing/incompatible build assets and deps\ncompose is architecture intent, not working runtime", shape=note, color="#8794A8", fillcolor="#FFF4F4", style="filled,dotted"];
+    react -> dnginx -> dbackend [style=dotted, color="#8794A8"];
+    dbackend -> postgres [style=dotted, color="#8794A8"];
+    dbackend -> redis [style=dotted, color="#8794A8"];
+    redis -> celery [style=dotted, color="#8794A8"];
+    celery -> postgres [style=dotted, color="#8794A8"];
+    dbackend -> monitoring [style=dotted, color="#8794A8"];
+    dockerissues -> dnginx [style=dotted, color="#8794A8", arrowhead=none];
+  }
+
+  subgraph cluster_config_safety {
+    label="SHARED CONFIGURATION, STORAGE & SAFETY"; color="#D1B8A8"; fillcolor="#FFF8F3"; style="rounded,filled"; fontcolor="#855440";
+    config [label="config.json + environment variables", shape=note];
+    gitignore [label=".gitignore protects uploads/results/DBs/\nsecrets/VCFs/reference repositories", shape=note, fillcolor="#FFF1F1", color="#D99090"];
+    resultstore [label="results/\nused by MCP/Flask reports; only mounted by\nactive app when directory already exists", shape=cylinder];
+    config -> app;
+    config -> mcp [color="#3975D4"];
+    config -> flask [color="#3975D4"];
+    config -> prod [color="#3975D4"];
+    gitignore -> uploadstore [style=dashed, arrowhead=none];
+    gitignore -> sqlite [style=dashed, arrowhead=none];
+    gitignore -> clinidx [style=dashed, arrowhead=none];
+    reports -> resultstore;
+    flaskfiles -> resultstore;
+  }
+
+  disclaimer [label="RESEARCH / EDUCATION ONLY\nActive results are not diagnosis, prescribing advice, or proof of clinical suitability.\nClinVar/common-risk and star-allele foundations are not active dashboard evidence.", shape=note, fillcolor="#FFF4DF", color="#D7A64D", fontcolor="#704B10", fontsize=10.5];
+  ui_results -> disclaimer [style=dashed, arrowhead=none];
+}
