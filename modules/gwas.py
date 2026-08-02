@@ -315,6 +315,11 @@ def parse_phenotype_table(
 
     if not samples:
         raise GWASInputError("No samples with a usable phenotype value were found")
+    if len(samples) != len(set(samples)):
+        duplicates = sorted({sample for sample in samples if samples.count(sample) > 1})
+        preview = ", ".join(duplicates[:5])
+        suffix = "..." if len(duplicates) > 5 else ""
+        raise GWASInputError(f"The phenotype file contains duplicate sample IDs: {preview}{suffix}")
 
     # Keep only covariate columns that are fully numeric across kept samples.
     usable_cov: List[str] = []

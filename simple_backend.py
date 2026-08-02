@@ -37,20 +37,36 @@ try:
     from modules.drug_matcher import DrugMatcher
     from modules.clinvar_annotator import ClinVarAnnotator
     from modules.diabetes_common_risk import DiabetesCommonRiskAnnotator
+    from modules.variant_tiering import VariantTiering
+    from modules.ppi_network import PPINetworkAnalyzer
+    from modules.gene_expression import GeneExpressionProfiler
+    from modules.virtual_screening import VirtualScreeningEngine
+    from modules.target_nomination import TargetNominator
     from modules import diabetes_kb
-    from modules.gwas import (
-        run_gwas, run_genotype_only_manhattan, parse_phenotype_table, GWASInputError,
-    )
     modules_available = True
     module_import_error = None
 except Exception as e:  # catch ImportError AND any error raised at import time
     import traceback
     module_import_error = traceback.format_exc()
     print("=" * 70)
-    print("MODULES FAILED TO LOAD:")
+    print("CLINICAL MODULES FAILED TO LOAD:")
     print(module_import_error)
     print("=" * 70)
     modules_available = False
+
+try:
+    from modules.gwas import parse_phenotype_table, GWASInputError
+    from modules.gwas_streaming import run_gwas_vcf_streaming, run_hwe_vcf_streaming
+    gwas_modules_available = True
+    gwas_module_import_error = None
+except Exception:  # keep cohort analysis independent of clinical annotators
+    import traceback
+    gwas_module_import_error = traceback.format_exc()
+    print("=" * 70)
+    print("GWAS MODULES FAILED TO LOAD:")
+    print(gwas_module_import_error)
+    print("=" * 70)
+    gwas_modules_available = False
 
 # ----------------------------------------------------------------------------
 # Tunables for local testing.
@@ -61,7 +77,7 @@ BASE_DIR = Path(__file__).resolve().parent
 EXAMPLE_VCF_PATH = BASE_DIR / "examples" / "sample_pharmacogenomics.vcf"
 MAX_VARIANTS_TO_VEP = int(os.getenv("MAX_VARIANTS_TO_VEP", "300"))
 MAX_GENES_FOR_STRUCTURE = int(os.getenv("MAX_GENES_FOR_STRUCTURE", "15"))
-MAX_MANHATTAN_POINTS = int(os.getenv("MAX_MANHATTAN_POINTS", "12000"))
+MAX_MANHATTAN_POINTS = max(1, int(os.getenv("MAX_MANHATTAN_POINTS", "12000")))
 VEP_BATCH_TIMEOUT = 90        # seconds per VEP batch
 STRUCTURE_TIMEOUT = 60        # seconds per structure lookup
 DRUG_TIMEOUT = 20             # seconds per gene drug lookup
@@ -99,6 +115,11 @@ async def initialize_components():
                 "drug_matcher": DrugMatcher(config),
                 "clinvar_annotator": ClinVarAnnotator(config, BASE_DIR),
                 "diabetes_common_risk": DiabetesCommonRiskAnnotator(config, BASE_DIR),
+                "variant_tiering": VariantTiering(),
+                "ppi_network": PPINetworkAnalyzer(config),
+                "gene_expression": GeneExpressionProfiler(config),
+                "virtual_screening": VirtualScreeningEngine(config),
+                "target_nominator": TargetNominator(config),
             }
             print("Pipeline components initialized")
         else:
@@ -204,63 +225,68 @@ async def run_gwas_endpoint(
     trait. Testing genotypes against a phenotype invented from those same
     genotypes would be circular and statistically invalid, so we do not do it.
     """
-    if not (modules_available and "vcf_parser" in pipeline_components):
-        detail = module_import_error or "components not initialized (check config.json)"
-        raise HTTPException(status_code=503, detail=f"Pipeline modules unavailable: {detail}")
-    if not vcf_file.filename.lower().endswith((".vcf", ".vcf.gz")):
+    if not gwas_modules_available:
+        detail = gwas_module_import_error or "GWAS modules are unavailable"
+        raise HTTPException(status_code=503, detail=f"GWAS modules unavailable: {detail}")
+    original_filename = vcf_file.filename or ""
+    safe_filename = Path(original_filename).name
+    if not safe_filename.lower().endswith((".vcf", ".vcf.gz")):
         raise HTTPException(status_code=400, detail="Genotype file must be a VCF (.vcf or .vcf.gz)")
     if genome_build not in {"auto", "GRCh37", "GRCh38"}:
         raise HTTPException(status_code=400, detail="Genome build must be auto, GRCh37, or GRCh38")
 
     has_phenotype = phenotype_file is not None and bool(getattr(phenotype_file, "filename", ""))
 
-    upload_dir = Path("uploads")
+    upload_dir = BASE_DIR / "uploads"
     upload_dir.mkdir(exist_ok=True)
     token = str(uuid.uuid4())
-    vcf_path = upload_dir / f"{token}_{vcf_file.filename}"
+    vcf_path = upload_dir / f"{token}_{safe_filename}"
 
     try:
-        vcf_path.write_bytes(await vcf_file.read())
-        vcf_parser = pipeline_components["vcf_parser"]
+        # Stream the upload to disk instead of materializing the complete VCF
+        # in RAM. The association functions below also process one VCF row at
+        # a time, which keeps cohort analysis viable on small servers.
+        with vcf_path.open("wb") as destination:
+            while chunk := await vcf_file.read(1024 * 1024):
+                destination.write(chunk)
 
         if has_phenotype:
             phenotype_text = (await phenotype_file.read()).decode("utf-8", errors="replace")
             phenotype_spec = parse_phenotype_table(
                 phenotype_text, phenotype_column=phenotype_column or None,
             )
-            seed_sample = phenotype_spec["samples"][0]
-            vcf_results = await vcf_parser.parse_vcf(str(vcf_path), seed_sample)
-            metadata = vcf_results.get("vcf_metadata", {}) or {}
-            resolved_build = genome_build if genome_build in {"GRCh37", "GRCh38"} else metadata.get("genome_build", "unknown")
-            plot = await asyncio.to_thread(
-                run_gwas,
-                vcf_results.get("pgx_records", []) or [],
+            plot, metadata = await asyncio.to_thread(
+                run_gwas_vcf_streaming,
+                str(vcf_path),
                 phenotype_spec,
-                resolved_build,
+                genome_build,
+                0.5,
+                3,
+                MAX_MANHATTAN_POINTS,
             )
             return {
                 "status": plot["status"],
                 "mode": "association",
-                "genome_build": resolved_build,
-                "vcf_samples": len(metadata.get("sample_ids", []) or []),
+                "genome_build": metadata["genome_build"],
+                "vcf_samples": metadata["sample_count"],
                 "phenotype_samples": len(phenotype_spec["samples"]),
                 "manhattan_plot": plot,
             }
 
         # Genotype-only mode: no phenotype supplied.
-        vcf_results = await vcf_parser.parse_vcf(str(vcf_path), "")
-        metadata = vcf_results.get("vcf_metadata", {}) or {}
-        resolved_build = genome_build if genome_build in {"GRCh37", "GRCh38"} else metadata.get("genome_build", "unknown")
-        plot = await asyncio.to_thread(
-            run_genotype_only_manhattan,
-            vcf_results.get("pgx_records", []) or [],
-            resolved_build,
+        plot, metadata = await asyncio.to_thread(
+            run_hwe_vcf_streaming,
+            str(vcf_path),
+            genome_build,
+            0.5,
+            10,
+            MAX_MANHATTAN_POINTS,
         )
         return {
             "status": plot["status"],
             "mode": "hwe",
-            "genome_build": resolved_build,
-            "vcf_samples": len(metadata.get("sample_ids", []) or []),
+            "genome_build": metadata["genome_build"],
+            "vcf_samples": metadata["sample_count"],
             "phenotype_samples": 0,
             "manhattan_plot": plot,
         }
@@ -509,6 +535,11 @@ async def analyze_file(
         drug_matcher = pipeline_components["drug_matcher"]
         clinvar_annotator = pipeline_components["clinvar_annotator"]
         common_risk_annotator = pipeline_components["diabetes_common_risk"]
+        tiering_engine = pipeline_components["variant_tiering"]
+        ppi_analyzer = pipeline_components["ppi_network"]
+        expression_profiler = pipeline_components["gene_expression"]
+        screening_engine = pipeline_components["virtual_screening"]
+        target_nominator = pipeline_components["target_nominator"]
 
         # ---- Step 1: parse VCF -------------------------------------------------
         _set(upload_id, progress=10.0, message="Parsing VCF and computing QC...")
@@ -659,6 +690,68 @@ async def analyze_file(
             except (asyncio.TimeoutError, Exception):
                 continue
 
+        # ---- Step 7: variant tiering (Objective 1) ----------------------------
+        # Deterministic and local, so this runs before the remote discovery
+        # stages and always produces a result.
+        _set(upload_id, progress=88.0, message="Segregating variants into evidence tiers...")
+        tiering_result = tiering_engine.tier_variants(
+            mutations=mutations,
+            clinvar_findings=clinvar_result.get("findings", []),
+            common_risk_findings=common_risk_result.get("findings", []),
+            structures=structures,
+            drug_results=drug_results,
+            clinvar_status=clinvar_result,
+            common_risk_status=common_risk_result,
+        )
+
+        # ---- Step 8: PPI network + expression (Objectives 3 and 4) -----------
+        # Prefer genes that actually reached a meaningful tier; fall back to all
+        # mutated genes so the network still builds on thin samples.
+        tiered_genes = [
+            v["gene_symbol"] for v in tiering_result.get("variants", [])
+            if v.get("gene_symbol") and v.get("tier", 4) <= 3
+        ]
+        network_seed_genes = list(dict.fromkeys(tiered_genes or list(genes_seen.keys())))
+
+        _set(upload_id, progress=90.0,
+             message="Building protein-protein interaction network and expression profile...")
+        ppi_result, expression_result = await asyncio.gather(
+            ppi_analyzer.analyze(network_seed_genes),
+            expression_profiler.profile_genes(network_seed_genes),
+            return_exceptions=True,
+        )
+        if isinstance(ppi_result, Exception):
+            ppi_result = {"status": "error", "warnings": [str(ppi_result)],
+                          "edges": [], "nodes": [], "hubs": [], "enrichment": []}
+        if isinstance(expression_result, Exception):
+            expression_result = {"status": "error", "warnings": [str(expression_result)],
+                                 "profiles": []}
+
+        # ---- Step 9: integrative target nomination ---------------------------
+        _set(upload_id, progress=94.0, message="Nominating candidate therapeutic targets...")
+        nomination_result = target_nominator.nominate(
+            tiering=tiering_result,
+            ppi=ppi_result,
+            expression=expression_result,
+            structures=structures,
+            drug_results=drug_results,
+        )
+
+        # ---- Step 10: virtual screening (Objective 4) ------------------------
+        _set(upload_id, progress=97.0,
+             message="Screening candidate targets against ChEMBL bioactivity data...")
+        screening_targets = [
+            {"gene_symbol": c["gene_symbol"], "rationale": c["rationale"]}
+            for c in nomination_result.get("candidates", [])
+        ]
+        try:
+            screening_result = await screening_engine.screen_targets(screening_targets)
+        except Exception as exc:
+            screening_result = {
+                "status": "error", "warnings": [str(exc)],
+                "screened_targets": [], "docking_performed": False,
+            }
+
         # ---- Mutation-type breakdown (for charts) -----------------------------
         mutation_type_counts = {}
         for m in mutations:
@@ -711,6 +804,11 @@ async def analyze_file(
             "clinvar_evaluated": clinvar_result.get("status") == "complete",
             "diabetes_common_risk_status": _evidence_status(common_risk_result),
             "diabetes_common_risk_findings": common_risk_result.get("findings", []),
+            "variant_tiering": tiering_result,
+            "ppi_network": ppi_result,
+            "gene_expression": expression_result,
+            "target_nomination": nomination_result,
+            "virtual_screening": screening_result,
             "summary": {
                 "total_variants": total_variants,
                 "variants_annotated": len(annotated),
@@ -722,6 +820,15 @@ async def analyze_file(
                 "clinvar_matches": clinvar_result.get("matched_records", 0),
                 "common_risk_matches": common_risk_result.get("matched_records", 0),
                 "manhattan_points": manhattan_data.get("point_count", 0),
+                "tier1_variants": tiering_result.get("tier_counts", {}).get(1, 0),
+                "tier2_variants": tiering_result.get("tier_counts", {}).get(2, 0),
+                "ppi_nodes": ppi_result.get("node_count", 0),
+                "ppi_edges": ppi_result.get("edge_count", 0),
+                "enriched_pathways": len(ppi_result.get("enrichment", []) or []),
+                "expression_profiled_genes": expression_result.get("profiled_gene_count", 0),
+                "candidate_targets": nomination_result.get("candidate_count", 0),
+                "screened_compounds": screening_result.get("total_compounds", 0),
+                "repurposing_candidates": screening_result.get("approved_drug_count", 0),
             },
         }
 
@@ -1403,6 +1510,10 @@ function renderResults(r) {
     html += metric(s.genes_affected, 'Genes Affected');
     html += metric(s.structures_resolved, 'Structures');
     html += metric(s.drug_matches, 'Drug Matches');
+    html += metric(s.tier1_variants, 'Tier 1 Variants');
+    html += metric(s.candidate_targets, 'Candidate Targets');
+    html += metric(s.enriched_pathways, 'Enriched Pathways');
+    html += metric(s.screened_compounds, 'Screened Compounds');
     html += '</div>';
     if (r.annotation_capped) {
         html += '<div class="note">Only the first ' + Number(r.variants_annotated || 0) +
@@ -1572,6 +1683,12 @@ function renderResults(r) {
     }
     html += '</div>';
 
+    html += renderTieringSection(r.variant_tiering || {});
+    html += renderPpiSection(r.ppi_network || {});
+    html += renderExpressionSection(r.gene_expression || {});
+    html += renderTargetSection(r.target_nomination || {});
+    html += renderScreeningSection(r.virtual_screening || {});
+
     // Drugs
     html += '<div class="card"><h2>Drug Interactions</h2>';
     html += '<p class="section-description">Evidence comes from ClinPGx/PharmGKB clinical annotations. ' +
@@ -1641,6 +1758,279 @@ function renderResults(r) {
     });
     renderManhattanPlot(r.manhattan_plot || {}, (r.vcf_metadata || {}).genome_build || 'unknown');
     renderMutationDonut(r.mutation_type_counts || {});
+}
+
+function sectionShell(title, status, description, body, extraClass) {
+    var html = '<div class="card ' + (extraClass || '') + '"><div class="evidence-head"><h2>' +
+               escapeHtml(title) + '</h2><span class="evidence-status ' +
+               evidenceStatusClass(status) + '">' + evidenceStatusLabel(status) + '</span></div>';
+    html += '<p class="section-description">' + description + '</p>';
+    return html + body + '</div>';
+}
+
+function renderWarnings(warnings) {
+    var html = '';
+    (warnings || []).forEach(function(warning) {
+        html += '<div class="evidence-warning">' + escapeHtml(warning) + '</div>';
+    });
+    return html;
+}
+
+function renderTieringSection(t) {
+    var counts = t.tier_counts || {};
+    var body = '';
+    body += '<div class="evidence-summary">' +
+            '<span>Evaluated: ' + Number(t.evaluated_variants || 0) + '</span>' +
+            '<span>Tier 1: ' + Number(counts['1'] || 0) + '</span>' +
+            '<span>Tier 2: ' + Number(counts['2'] || 0) + '</span>' +
+            '<span>Tier 3: ' + Number(counts['3'] || 0) + '</span>' +
+            '<span>Tier 4: ' + Number(counts['4'] || 0) + '</span></div>';
+    body += renderWarnings(t.evidence_limitations);
+
+    var variants = (t.variants || []).filter(function(v) { return v.tier <= 3; });
+    if (!variants.length) {
+        body += '<p>No variant reached Tier 1-3. Tier 4 alleles carry no established diabetes evidence.</p>';
+    } else {
+        body += '<table><tr><th>Tier</th><th>Gene</th><th>Position</th><th>Change</th>' +
+                '<th>Consequence</th><th>Why this tier</th></tr>';
+        variants.forEach(function(v) {
+            var badgeColor = v.tier === 1 ? '#c93838' : (v.tier === 2 ? '#e07b1a' : '#2879dc');
+            var badge = '<span style="display:inline-block;padding:5px 9px;border-radius:6px;background:' +
+                        badgeColor + ';color:#fff;font-size:.72rem;font-weight:800;white-space:nowrap;">Tier ' +
+                        Number(v.tier) + '</span>';
+            var reasons = (v.reasons || []).map(function(reason) {
+                return '<li>' + escapeHtml(reason) + '</li>';
+            }).join('');
+            body += '<tr><td>' + badge + '</td><td><strong>' + escapeHtml(v.gene_symbol || '-') +
+                    '</strong></td><td>' + escapeHtml(v.position || '-') + '</td><td>' +
+                    escapeHtml(v.amino_acid_change || (v.ref + '>' + v.alt)) + '</td><td>' +
+                    escapeHtml((v.consequence_terms || []).join(', ') || '-') +
+                    '</td><td><ul style="margin:0;padding-left:16px;">' + reasons + '</ul></td></tr>';
+        });
+        body += '</table>';
+    }
+    return sectionShell(
+        'T2D Variant Tiers (early detection triage)', t.status,
+        'Deterministic rule-based segregation of coding variants into evidence tiers. ' +
+        'Each tier records the exact rules that fired. This is research prioritisation, ' +
+        'not ACMG classification and not a diagnosis.',
+        body, 'evidence-layer'
+    );
+}
+
+function renderPpiSection(p) {
+    var body = '';
+    body += '<div class="evidence-summary">' +
+            '<span>Nodes: ' + Number(p.node_count || 0) + '</span>' +
+            '<span>Interactions: ' + Number(p.edge_count || 0) + '</span>' +
+            '<span>Density: ' + escapeHtml(String(p.network_density == null ? '-' : p.network_density)) + '</span>' +
+            '<span>Confidence cutoff: ' + Number(p.required_score || 0) + '/1000</span>' +
+            '<span>Engine: ' + escapeHtml(p.metrics_engine || '-') + '</span></div>';
+    body += renderWarnings(p.warnings);
+
+    var hubs = p.hubs || [];
+    if (hubs.length) {
+        body += '<h3 class="gene-title">Candidate biomarker hubs</h3>';
+        body += '<table><tr><th>Gene</th><th>Hub score</th><th>Degree</th>' +
+                '<th>Betweenness</th><th>In sample</th><th>Rationale</th></tr>';
+        hubs.forEach(function(h) {
+            body += '<tr><td><strong>' + escapeHtml(h.gene_symbol) + '</strong></td><td>' +
+                    escapeHtml(String(h.hub_score == null ? '-' : h.hub_score)) + '</td><td>' +
+                    Number(h.degree || 0) + '</td><td>' +
+                    escapeHtml(String(h.betweenness_centrality == null ? '-' : h.betweenness_centrality)) +
+                    '</td><td>' + (h.is_seed ? 'mutated' : 'network partner') + '</td><td>' +
+                    escapeHtml(h.rationale || '-') + '</td></tr>';
+        });
+        body += '</table>';
+    }
+
+    var pathways = (p.enrichment || []).filter(function(term) {
+        return ['KEGG', 'RCTM', 'WikiPathways'].indexOf(term.category) !== -1;
+    }).slice(0, 15);
+    if (pathways.length) {
+        body += '<h3 class="gene-title">Enriched pathways</h3>';
+        body += '<table><tr><th>Source</th><th>Pathway</th><th>Genes</th><th>FDR</th></tr>';
+        pathways.forEach(function(term) {
+            body += '<tr><td>' + escapeHtml(term.category_label || term.category) + '</td><td>' +
+                    escapeHtml(term.description || term.term) + '</td><td>' +
+                    escapeHtml((term.genes || []).join(', ')) + '</td><td>' +
+                    escapeHtml(String(term.fdr)) + '</td></tr>';
+        });
+        body += '</table>';
+    }
+
+    var modules = (p.modules || []).slice(0, 6);
+    if (modules.length) {
+        body += '<h3 class="gene-title">Functional modules (greedy modularity)</h3>';
+        body += '<table><tr><th>Module</th><th>Size</th><th>Genes</th></tr>';
+        modules.forEach(function(m) {
+            body += '<tr><td>' + Number(m.module_id) + '</td><td>' + Number(m.size) +
+                    '</td><td>' + escapeHtml((m.genes || []).join(', ')) + '</td></tr>';
+        });
+        body += '</table>';
+    }
+
+    if (!hubs.length && !pathways.length) {
+        body += '<p>No interaction network could be constructed for this gene set.</p>';
+    }
+    if (p.interpretation) {
+        body += '<div class="note">' + escapeHtml(p.interpretation) + '</div>';
+    }
+    return sectionShell(
+        'Protein-Protein Interaction Network', p.status,
+        'Network built from the STRING database for genes carrying variants in this sample. ' +
+        'Centrality identifies topological hubs as candidate functional biomarkers. ' +
+        'Combined scores mix experimental and predicted evidence channels.',
+        body, 'evidence-layer'
+    );
+}
+
+function renderExpressionSection(e) {
+    var body = '';
+    body += '<div class="evidence-summary">' +
+            '<span>Dataset: ' + escapeHtml(e.dataset || '-') + '</span>' +
+            '<span>Profiled genes: ' + Number(e.profiled_gene_count || 0) + '</span>' +
+            '<span>Unit: median TPM</span></div>';
+    body += renderWarnings(e.warnings);
+
+    var profiles = e.profiles || [];
+    if (!profiles.length) {
+        body += '<p>No expression profile was retrieved for the mutated genes.</p>';
+    } else {
+        body += '<table><tr><th>Gene</th><th>Relevance</th><th>Peak tissue</th>' +
+                '<th>Median TPM</th><th>Diabetes-relevant tissues</th></tr>';
+        profiles.forEach(function(p) {
+            var relevance = p.diabetes_tissue_relevance || {};
+            var color = relevance.level === 'high' ? '#08b86c'
+                      : (relevance.level === 'moderate' ? '#2879dc' : '#94a3b8');
+            var badge = '<span style="display:inline-block;padding:5px 9px;border-radius:6px;background:' +
+                        color + ';color:#fff;font-size:.72rem;font-weight:800;">' +
+                        escapeHtml(relevance.level || 'unknown') + '</span>';
+            var tissues = (p.diabetes_relevant_tissues || []).slice(0, 4).map(function(t) {
+                return escapeHtml(t.tissue) + ' (' + t.median_tpm + ')';
+            }).join(', ');
+            body += '<tr><td><strong>' + escapeHtml(p.gene_symbol) + '</strong></td><td>' + badge +
+                    '</td><td>' + escapeHtml(p.peak_tissue || '-') + ' (' +
+                    escapeHtml(String(p.peak_tissue_tpm)) + ')</td><td>' +
+                    escapeHtml(String(p.overall_median_tpm)) + '</td><td>' + tissues + '</td></tr>';
+        });
+        body += '</table>';
+    }
+    if (e.interpretation) {
+        body += '<div class="note">' + escapeHtml(e.interpretation) + '</div>';
+    }
+    return sectionShell(
+        'Gene Expression Profiling (tissue context)', e.status,
+        'Median expression across human tissues from the GTEx reference population. ' +
+        'These are not this patient\\'s expression values and no differential-expression ' +
+        'test is performed.',
+        body, 'evidence-layer'
+    );
+}
+
+function renderTargetSection(n) {
+    var body = '';
+    body += '<div class="evidence-summary">' +
+            '<span>Candidates: ' + Number(n.candidate_count || 0) + '</span></div>';
+    body += renderWarnings(
+        (n.missing_evidence_streams || []).map(function(stream) {
+            return 'Evidence stream unavailable and scored zero: ' + stream + '.';
+        })
+    );
+
+    var candidates = n.candidates || [];
+    if (!candidates.length) {
+        body += '<p>No candidate targets passed the minimum evidence threshold.</p>';
+    } else {
+        body += '<table><tr><th>Rank</th><th>Gene</th><th>Score</th><th>Streams</th>' +
+                '<th>Evidence</th></tr>';
+        candidates.forEach(function(c, index) {
+            var evidence = (c.evidence || []).map(function(item) {
+                return '<li>' + escapeHtml(item) + '</li>';
+            }).join('');
+            body += '<tr><td>' + (index + 1) + '</td><td><strong>' +
+                    escapeHtml(c.gene_symbol) + '</strong>' +
+                    (c.patient_variant ? '' : ' <em>(network-derived)</em>') +
+                    '</td><td>' + escapeHtml(String(c.target_score)) + '</td><td>' +
+                    Number(c.evidence_stream_count || 0) + '</td>' +
+                    '<td><ul style="margin:0;padding-left:16px;">' + evidence + '</ul></td></tr>';
+        });
+        body += '</table>';
+    }
+    if (n.interpretation) {
+        body += '<div class="note">' + escapeHtml(n.interpretation) + '</div>';
+    }
+    return sectionShell(
+        'Integrative Candidate Target Nomination', n.status,
+        'Transparent weighted fusion of variant tier, network topology, pathway membership, ' +
+        'tissue expression, structural context and pharmacogenomic evidence. ' +
+        'Missing evidence contributes zero and is never imputed.',
+        body, 'evidence-layer'
+    );
+}
+
+function renderScreeningSection(v) {
+    var body = '';
+    body += '<div class="evidence-summary">' +
+            '<span>Method: ' + escapeHtml(v.method || '-') + '</span>' +
+            '<span>Targets: ' + Number(v.target_count || 0) + '</span>' +
+            '<span>Compounds: ' + Number(v.total_compounds || 0) + '</span>' +
+            '<span>Approved: ' + Number(v.approved_drug_count || 0) + '</span>' +
+            '<span>Novel drug-like: ' + Number(v.novel_druglike_count || 0) + '</span></div>';
+    body += '<div class="evidence-warning">Structure-based docking was not performed. ' +
+            'Rankings use experimentally measured ChEMBL affinities, not predicted binding poses.</div>';
+    body += renderWarnings(v.warnings);
+
+    var targets = v.screened_targets || [];
+    if (!targets.length) {
+        body += '<p>No candidate target had screenable bioactivity data in ChEMBL.</p>';
+    }
+    targets.forEach(function(t) {
+        body += '<h3 class="gene-title">' + escapeHtml(t.gene_symbol) + ' — ' +
+                escapeHtml(t.target_name || '-') +
+                ' <a href="' + safeExternalUrl(t.target_chembl_url, 'https://www.ebi.ac.uk/chembl/') +
+                '" target="_blank" rel="noopener noreferrer">ChEMBL target &#8599;</a></h3>';
+        if (t.target_rationale) {
+            body += '<p class="section-description">' + escapeHtml(t.target_rationale) + '</p>';
+        }
+        body += '<table><tr><th>Compound</th><th>Stage</th><th>Mechanism</th><th>Potency</th>' +
+                '<th>pActivity</th><th>Drug-likeness</th><th>Priority</th><th>Link</th></tr>';
+        (t.compounds || []).slice(0, 10).forEach(function(c) {
+            var dl = c.drug_likeness || {};
+            var dlText = dl.available
+                ? escapeHtml(dl.verdict || '-') + ' (MW ' + escapeHtml(String(dl.molecular_weight)) +
+                  ', QED ' + escapeHtml(String(dl.qed_weighted)) + ')'
+                : 'not available';
+            var stageColor = c.is_approved_drug ? '#08b86c' : '#64748b';
+            var potency = c.potency_nm == null
+                ? '<em>no potency record</em>'
+                : escapeHtml(String(c.potency_nm)) + ' nM ' + escapeHtml(c.activity_type || '');
+            var mechanism = c.mechanism_of_action
+                ? escapeHtml(c.mechanism_of_action) +
+                  (c.action_type ? ' (' + escapeHtml(c.action_type) + ')' : '')
+                : '-';
+            body += '<tr><td><strong>' + escapeHtml(c.preferred_name || c.molecule_chembl_id) +
+                    '</strong></td><td><span style="display:inline-block;padding:4px 8px;border-radius:6px;background:' +
+                    stageColor + ';color:#fff;font-size:.7rem;font-weight:800;">' +
+                    escapeHtml(c.development_stage) + '</span></td><td>' + mechanism +
+                    '</td><td>' + potency +
+                    '</td><td>' + escapeHtml(String(c.pactivity == null ? '-' : c.pactivity)) +
+                    '</td><td>' + dlText + '</td><td>' + escapeHtml(String(c.priority_score)) +
+                    '</td><td><a href="' + safeExternalUrl(c.chembl_url, 'https://www.ebi.ac.uk/chembl/') +
+                    '" target="_blank" rel="noopener noreferrer">ChEMBL</a></td></tr>';
+        });
+        body += '</table>';
+    });
+    if (v.interpretation) {
+        body += '<div class="note">' + escapeHtml(v.interpretation) + '</div>';
+    }
+    return sectionShell(
+        'Virtual Screening — Antidiabetic Candidates', v.status,
+        'Ligand-based screening of nominated targets against measured bioactivity in ChEMBL. ' +
+        'Approved drugs indicate repurposing options; novel drug-like compounds are ' +
+        'chemical starting points for follow-up.',
+        body, 'evidence-layer'
+    );
 }
 
 function renderManhattanPlot(rawData, genomeBuild, hostId) {

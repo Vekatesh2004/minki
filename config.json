@@ -31,6 +31,35 @@
     "enabled": true,
     "catalog_path": "data/diabetes_common_risk.json"
   },
+  "ppi_network": {
+    "enabled": true,
+    "base_url": "https://string-db.org/api",
+    "required_score": 400,
+    "max_seed_genes": 40,
+    "expansion_limit": 20,
+    "timeout": 45
+  },
+  "gene_expression": {
+    "enabled": true,
+    "base_url": "https://gtexportal.org/api/v2",
+    "dataset_id": "gtex_v8",
+    "max_genes": 25,
+    "concurrency": 4,
+    "timeout": 45
+  },
+  "virtual_screening": {
+    "enabled": true,
+    "base_url": "https://www.ebi.ac.uk/chembl/api/data",
+    "max_targets": 6,
+    "max_compounds_per_target": 12,
+    "activity_fetch_limit": 120,
+    "concurrency": 3,
+    "timeout": 60
+  },
+  "target_nomination": {
+    "max_targets": 25,
+    "min_score": 0.05
+  },
   "qc_thresholds": {
     "min_qual": 30,
     "min_depth": 10,
