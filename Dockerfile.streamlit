@@ -1,0 +1,45 @@
+# Minki / HelixAI — Streamlit deployment for pharmacogenomics pipeline
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    STREAMLIT_SERVER_PORT=8501 \
+    STREAMLIT_SERVER_ADDRESS=0.0.0.0 \
+    STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+
+# System build deps (cyvcf2/scipy/statsmodels wheels usually cover this,
+# but these headers make source builds reliable across architectures).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc g++ make \
+    zlib1g-dev libbz2-dev liblzma-dev libcurl4-openssl-dev libssl-dev \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install Python dependencies first for better layer caching.
+COPY requirements_streamlit.txt .
+RUN pip install --no-cache-dir -r requirements_streamlit.txt
+
+# Copy application code and assets.
+COPY streamlit_app.py config.json ./
+COPY modules/ ./modules/
+COPY scripts/ ./scripts/
+COPY examples/ ./examples/
+
+# Generate the synthetic demonstration datasets so the ClinVar / common-risk
+# panels populate for the bundled example. These are clearly-labelled synthetic
+# demo data, not real clinical evidence.
+RUN python scripts/make_diabetes_demo_data.py
+
+# Runtime working directories.
+RUN mkdir -p /app/uploads /app/results
+
+EXPOSE 8501
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+  CMD curl -fsS http://localhost:8501/_stcore/health || exit 1
+
+CMD ["streamlit", "run", "streamlit_app.py", "--server.port=8501", "--server.address=0.0.0.0"]

@@ -1,0 +1,14 @@
+# Streamlit deployment dependencies for the Pharmacogenomics Pipeline
+streamlit>=1.28.0
+pandas>=2.0.0
+cyvcf2>=0.30.0
+biopython>=1.81
+requests>=2.31.0
+py3Dmol>=2.0.0
+numpy>=1.24.0
+scipy>=1.10.0
+statsmodels>=0.14.0
+aiohttp>=3.8.0
+mcp>=0.5.0
+pydantic>=2.0.0
+python-dotenv>=1.0.0
