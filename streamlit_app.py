@@ -297,7 +297,7 @@ def main():
                 else:
                     st.success("Analysis completed!")
                     st.session_state["demo_results"] = results
-                    st.session_state["demo_sample_id"] = sample_id
+                    st.session_state["demo_sample_id_value"] = sample_id
 
             if "demo_results" in st.session_state:
                 results = st.session_state["demo_results"]
@@ -332,7 +332,7 @@ def main():
                     else:
                         st.success("Analysis completed!")
                         st.session_state["upload_results"] = results
-                        st.session_state["upload_sample_id"] = sample_id
+                        st.session_state["upload_sample_id_value"] = sample_id
 
         if "upload_results" in st.session_state:
             results = st.session_state["upload_results"]
