@@ -13,8 +13,8 @@ statsmodels>=0.14.0
 # PPI network construction and centrality analysis (Objective 3)
 networkx>=3.0
 
-# MCP support
-mcp>=0.5.0
+# MCP support (pinned <2 for decorator API used by pharmacogenomics_mcp.py)
+mcp>=0.5.0,<2
 pydantic>=2.0.0
 aiohttp>=3.8.0
 
