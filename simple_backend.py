@@ -75,7 +75,7 @@ except Exception:  # keep cohort analysis independent of clinical annotators
 # ----------------------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent
 EXAMPLE_VCF_PATH = BASE_DIR / "examples" / "sample_pharmacogenomics.vcf"
-MAX_VARIANTS_TO_VEP = int(os.getenv("MAX_VARIANTS_TO_VEP", "0"))  # 0 = no cap (annotate all)
+MAX_VARIANTS_TO_VEP = int(os.getenv("MAX_VARIANTS_TO_VEP", "500"))
 MAX_GENES_FOR_STRUCTURE = int(os.getenv("MAX_GENES_FOR_STRUCTURE", "15"))
 MAX_MANHATTAN_POINTS = max(1, int(os.getenv("MAX_MANHATTAN_POINTS", "12000")))
 VEP_BATCH_TIMEOUT = 90        # seconds per VEP batch
