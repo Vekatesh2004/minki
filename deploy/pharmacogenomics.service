@@ -9,7 +9,7 @@ WorkingDirectory=/home/ubuntu/minki
 Environment=HOST=127.0.0.1
 Environment=PORT=8000
 Environment=RELOAD=0
-Environment=MAX_VARIANTS_TO_VEP=300
+# Environment=MAX_VARIANTS_TO_VEP=0  # 0 = annotate all variants (default); set a number to cap
 # Use the venv's python; adjust path if your venv lives elsewhere
 ExecStart=/home/ubuntu/minki/venv/bin/python /home/ubuntu/minki/simple_backend.py
 Restart=always

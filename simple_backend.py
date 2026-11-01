@@ -75,7 +75,7 @@ except Exception:  # keep cohort analysis independent of clinical annotators
 # ----------------------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent
 EXAMPLE_VCF_PATH = BASE_DIR / "examples" / "sample_pharmacogenomics.vcf"
-MAX_VARIANTS_TO_VEP = int(os.getenv("MAX_VARIANTS_TO_VEP", "300"))
+MAX_VARIANTS_TO_VEP = int(os.getenv("MAX_VARIANTS_TO_VEP", "0"))  # 0 = no cap (annotate all)
 MAX_GENES_FOR_STRUCTURE = int(os.getenv("MAX_GENES_FOR_STRUCTURE", "15"))
 MAX_MANHATTAN_POINTS = max(1, int(os.getenv("MAX_MANHATTAN_POINTS", "12000")))
 VEP_BATCH_TIMEOUT = 90        # seconds per VEP batch
@@ -590,7 +590,7 @@ async def analyze_file(
             if str(v.get("filter", "")).upper() in ("PASS", ".", "", "NONE")
         ]
         candidates = pass_variants if pass_variants else vep_source
-        to_annotate = candidates[:MAX_VARIANTS_TO_VEP]
+        to_annotate = candidates if MAX_VARIANTS_TO_VEP <= 0 else candidates[:MAX_VARIANTS_TO_VEP]
 
         _set(
             upload_id,
@@ -790,7 +790,7 @@ async def analyze_file(
             "total_variants": total_variants,
             "variants_annotated": len(annotated),
             "vep_candidate_count": len(candidates),
-            "annotation_capped": len(candidates) > len(to_annotate),
+            "annotation_capped": MAX_VARIANTS_TO_VEP > 0 and len(candidates) > len(to_annotate),
             "mutations": mutations,
             "mutation_type_counts": mutation_type_counts,
             "manhattan_plot": manhattan_data,
